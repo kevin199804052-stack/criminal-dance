@@ -62,6 +62,20 @@
   .big { font-size:1.3rem; font-weight:700; margin:10px 0; }
   .center { text-align:center; }
   .win { background: linear-gradient(160deg,#2a2150,#4a2d6e); }
+  /* 遊戲結束跳舞動畫 */
+  @keyframes dance {
+    0%   { transform: translateY(0)    rotate(-14deg); }
+    25%  { transform: translateY(-22px) rotate(14deg) scale(1.1); }
+    50%  { transform: translateY(0)    rotate(-14deg); }
+    75%  { transform: translateY(-22px) rotate(14deg) scale(1.1); }
+    100% { transform: translateY(0)    rotate(-14deg); }
+  }
+  .dancers { text-align:center; margin:14px 0 4px; line-height:1; }
+  .dancers span { display:inline-block; font-size:3.2rem; margin:0 2px; animation: dance .55s ease-in-out infinite; }
+  .dancers span:nth-child(2){ animation-delay:.12s }
+  .dancers span:nth-child(3){ animation-delay:.24s }
+  .dancers span:nth-child(4){ animation-delay:.36s }
+  .dancers span:nth-child(5){ animation-delay:.48s }
 </style>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
@@ -70,7 +84,7 @@
   <h1>🕺 犯人在跳舞</h1>
   <div class="sub">本機同桌 ＆ 線上連線</div>
   <div id="app"></div>
-  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v13 · 多人 3–8 人（依人數建牌+引擎一般化）</div>
+  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v15 · 犯人獲勝顯示慶祝GIF</div>
   <div id="toast" style="position:fixed;left:50%;bottom:30px;transform:translateX(-50%);
        background:#b02a4a;color:#fff;padding:12px 20px;border-radius:10px;font-size:1rem;
        opacity:0;transition:opacity .2s;pointer-events:none;z-index:99;max-width:90%;"></div>
@@ -429,6 +443,11 @@ function renderReveal(){
 
 function renderGameOver(){
   const g=state.gameover;
+  const villainWin = /逃脫/.test(g.title);   // 犯人(壞人)獲勝
+  const celebrate = villainWin
+    ? `<img src="https://media.giphy.com/media/8EX8UxSNLRp5AonNfv/giphy.gif" alt="壞人贏了！慶祝跳舞"
+           style="max-width:320px;width:85%;border-radius:14px;margin:10px auto;display:block">`
+    : `<div class="dancers"><span>🕺</span><span>💃</span><span>🕺</span><span>💃</span><span>🕺</span></div>`;
   const matchBanner = g.matchWinner!=null
     ? `<div class="panel win center" style="border-color:#ffd34d">
          <div class="big" style="font-size:2rem;color:#ffd34d">🏆 ${pname(g.matchWinner)} 贏得整場！</div>
@@ -441,6 +460,7 @@ function renderGameOver(){
        <button class="ghost" onclick="resetAll()">重設分數 / 改玩家</button>`;
   app.innerHTML=`
     <div class="panel win center">
+      ${celebrate}
       <div class="big" style="font-size:1.8rem">🎉 ${g.title}</div>
       <div style="font-size:1.1rem;line-height:1.9">${g.body}</div>
     </div>
