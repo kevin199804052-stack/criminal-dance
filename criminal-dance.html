@@ -84,7 +84,7 @@
   <h1>🕺 犯人在跳舞</h1>
   <div class="sub">本機同桌 ＆ 線上連線</div>
   <div id="app"></div>
-  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v23 · 真人退光只剩機器人時自動關房</div>
+  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v24 · 交易單向修正/再來一局回大廳累積分數</div>
   <div id="toast" style="position:fixed;left:50%;bottom:30px;transform:translateX(-50%);
        background:#b02a4a;color:#fff;padding:12px 20px;border-radius:10px;font-size:1rem;
        opacity:0;transition:opacity .2s;pointer-events:none;z-index:99;max-width:90%;"></div>
@@ -503,15 +503,17 @@ window.chooseTarget = (t)=>{
   const card=state.pending.card;
   if(card==="trade"){
     // 先把交易牌本身打出移除，之後「選一張給對方」就不會列到它、也不會索引錯位
-    const me=state.players[state.current];
+    const me=state.players[state.current], tp=state.players[t];
     me.hand.splice(state.pending.cardIdx,1);
     state.firstMoveDone=true;
-    if(me.hand.length===0){   // 出交易者已無其他牌可給 → 交易落空
-      log(`${me.name} 打出交易，但手上已無其他牌可換。`);
+    state.pending.target=t;
+    if(me.hand.length===0 && tp.hand.length===0){   // 雙方都沒牌 → 落空
+      log(`${me.name} 打出交易，但雙方都沒牌可換。`);
       state.pending=null; endTurn(); return;
     }
-    state.pending.target=t;
-    if(mode==='online') state.pending.tradePicks={};   // 線上：雙方同時選；本機維持逐一(tradeGive→tradeReceive)
+    if(mode==='online'){ state.pending.tradePicks={}; state.phase="tradeGive"; render(); return; }  // 線上雙方同時選；單向由 resolveTradeOnline 處理
+    // 本機同桌：出牌者沒牌可給 → 跳過自己，直接由對方選一張給我（單向）
+    if(me.hand.length===0){ state.pending.giveCard=null; state.phase="tradePass"; render(); return; }
     state.phase="tradeGive"; render(); return;
   }
   resolveTargeted(card, state.pending.cardIdx, t);
@@ -534,8 +536,8 @@ window.tradeReceiveCard = (idx)=>{
   const me=state.players[state.current], t=state.pending.target, tp=state.players[t];
   const theirCard=tp.hand.splice(idx,1)[0];
   me.hand.push(theirCard);                  // 對方選的牌 → 給我
-  tp.hand.push(state.pending.giveCard);     // 我選的牌 → 給對方
-  log(`${me.name} 與 ${tp.name} 各選一張牌交換了。`);
+  if(state.pending.giveCard!=null) tp.hand.push(state.pending.giveCard);  // 我選的牌→給對方（單向時 null 則不給）
+  log(`${me.name} 與 ${tp.name} 交換了手牌。`);
   state.pending=null;
   endTurn();
 };
@@ -886,18 +888,18 @@ window.leaveRoom=()=>{
 // ====== 線上遊戲本體（房主＝裁判，重用單機引擎）======
 
 // 房主開始遊戲：依房內人數發牌、指派座位 pid、開始監聽動作
-window.hostStart=(isRematch)=>{
+window.hostStart=()=>{
   const ids=Object.keys(net.room.players||{});
   if(ids.length<3){ nope('至少 3 人才能開始'); return; }
   const names=ids.map(id=>net.room.players[id].name);
   newGame(names);                                   // 重用單機引擎建局（內部會 render，此時 phase 仍 lobby）
   state.players.forEach((p,i)=>{ p.pid=ids[i]; p.bot=!!net.room.players[ids[i]].bot; });  // 座位 ↔ playerId、機器人標記
-  if(!isRematch || scores.length!==names.length) scores=new Array(names.length).fill(0);  // 再來一局：分數續累積
+  const rs=(net.room&&net.room.scores)||{};
+  scores=ids.map(pid=>rs[pid]||0);   // 依房間內 pid 延續系列賽分數（機器人也保留）；新房=0
   WIN_SCORE=10;            // 線上系列賽門檻：先達 10 分者獲勝（常見預設，可調）
   net.started=true; net.phase='game';
   net.turnLimit=30; net.timer=null; net.timerSig=null; net.deadline=null;   // 思考時間初始 30 秒
   const base='rooms/'+net.code;
-  db.ref(base+'/rematch').remove();        // 清空「再來一局」投票
   db.ref(base+'/status').set('playing');
   db.ref(base+'/status').onDisconnect().set('lobby');   // 房主離線→結束本局回大廳（搭配房主轉移）
   if(!net.actionsAttached){
@@ -907,9 +909,12 @@ window.hostStart=(isRematch)=>{
   broadcast();
   render();
 };
-window.backToLobby=()=>{ if(net&&net.isHost&&db) db.ref('rooms/'+net.code+'/status').set('lobby'); };
-window.voteRematch=()=>{ if(net&&db) db.ref('rooms/'+net.code+'/rematch/'+net.playerId).set(true); };
-window.hostRematch=()=>{ window.hostStart(true); };
+// reset=true：清空累積分數（開新賽局）；否則保留分數回大廳，由房主再按開始續玩
+window.backToLobby=(reset)=>{
+  if(!net||!net.isHost||!db) return;
+  if(reset){ db.ref('rooms/'+net.code+'/scores').remove(); scores=[]; }
+  db.ref('rooms/'+net.code+'/status').set('lobby');
+};
 // 機器人：房主在大廳新增/移除（機器人由房主端自動隨機出牌）
 window.addBot=()=>{
   if(!net||!net.isHost||!db) return;
@@ -922,7 +927,11 @@ window.addBot=()=>{
 window.removeBot=()=>{
   if(!net||!net.isHost||!db) return;
   const botKeys=Object.keys(net.room.players||{}).filter(k=>k.startsWith('bot'));
-  if(botKeys.length) db.ref('rooms/'+net.code+'/players/'+botKeys[botKeys.length-1]).remove();
+  if(botKeys.length){
+    const pid=botKeys[botKeys.length-1];
+    db.ref('rooms/'+net.code+'/players/'+pid).remove();
+    db.ref('rooms/'+net.code+'/scores/'+pid).remove();   // 移除機器人 → 其分數消失
+  }
 };
 function isBot(seat){ return state.players[seat] && state.players[seat].bot; }
 // 房主端：若此刻該行動者是機器人，延遲後自動隨機處理（一次一個，靠廣播連鎖）
@@ -1040,6 +1049,8 @@ function broadcast(){
   state.players.forEach((p,i)=>{
     db.ref(base+'/views/'+p.pid).set(JSON.parse(JSON.stringify(viewForSeat(i))));
   });
+  const sbp={}; state.players.forEach((p,i)=>{ sbp[p.pid]=scores[i]||0; });   // 累積分數依 pid 存房間(供大廳/續局/機器人保留)
+  db.ref(base+'/scores').set(sbp);
   botTick();   // 若輪到機器人，房主自動代打
 }
 
@@ -1196,19 +1207,11 @@ function renderNetGameOver(pub){
   let footer;
   if(g.matchWinner>=0){            // 有人達到門檻 → 系列賽結束
     footer=`<div class="panel win center" style="border-color:#ffd34d"><div class="big" style="font-size:1.7rem;color:#ffd34d">🏆 ${pub.players[g.matchWinner].name} 達 ${target} 分，贏得整場！</div></div>`+
-      `<div class="panel center">`+(net.isHost?`<button onclick="backToLobby()">回到大廳</button>`:`<div class="sub">系列賽結束</div>`)+`<button class="ghost" onclick="leaveRoom()">離開房間</button></div>`;
-  } else {                         // 投票再來一局
-    const rematch=(net.room&&net.room.rematch)||{}, host=net.room&&net.room.host;
-    const others=Object.keys((net.room&&net.room.players)||{}).filter(pid=>pid!==host);
-    const votes=others.filter(pid=>rematch[pid]).length, allReady=others.length>0 && votes===others.length;
-    let btns;
-    if(net.isHost){
-      btns=`<div class="sub">再來一局：${votes}/${others.length} 位玩家已準備</div>`+
-        `<button onclick="hostRematch()" ${allReady?'':'disabled'}>${allReady?'再來一局（分數續累積）':'等其他人按再來一局…'}</button>`;
-    } else {
-      btns = rematch[net.playerId] ? `<div class="sub">已準備，等待房主開始…</div>` : `<button onclick="voteRematch()">再來一局</button>`;
-    }
-    footer=`<div class="panel center">${btns}<button class="ghost" onclick="leaveRoom()">離開房間</button></div>`;
+      `<div class="panel center">`+(net.isHost?`<button onclick="backToLobby(true)">回大廳（開新賽局，分數歸零）</button>`:`<div class="sub">系列賽結束，等待房主</div>`)+`<button class="ghost" onclick="leaveRoom()">離開房間</button></div>`;
+  } else {                         // 尚未分出整場 → 回大廳續玩(分數保留)
+    footer=`<div class="panel center">`+
+      (net.isHost ? `<button onclick="backToLobby(false)">再來一局（回大廳，分數續累積）</button>` : `<div class="sub">等待房主再開一局…</div>`)+
+      `<button class="ghost" onclick="leaveRoom()">離開房間</button></div>`;
   }
   app.innerHTML=`<div class="panel win center">${celebrate}<div class="big" style="font-size:1.6rem">🎉 ${g.title}</div><div style="line-height:1.8">${g.body}</div></div>`+
     `<div class="panel"><div class="big">📊 總分（先達 ${target} 分獲勝）</div>${rows}</div>`+footer;
@@ -1237,8 +1240,10 @@ function netEntry(){
 function netLobby(){
   const room=net.room||{};
   const entries=room.players?Object.entries(room.players):[];
-  const chips=entries.map(([id,p])=>`<span class="badge">${p.bot?'🤖 ':''}${p.name}${id===room.host?' 👑':''}${id===net.playerId?'（你）':''}</span>`).join(' ');
+  const rs=room.scores||{};
+  const chips=entries.map(([id,p])=>`<span class="badge">${p.bot?'🤖 ':''}${p.name}${id===room.host?' 👑':''}${id===net.playerId?'（你）':''}${rs[id]?' '+rs[id]+'分':''}</span>`).join(' ');
   const n=entries.length, canStart=net.isHost && n>=3;
+  const hasScores=Object.values(rs).some(v=>v>0);
   const botCount=entries.filter(([,p])=>p.bot).length;
   app.innerHTML=`
     <div class="panel center">
@@ -1252,8 +1257,9 @@ function netLobby(){
           <button class="ghost" onclick="addBot()" ${n>=8?'disabled':''}>＋ 加機器人</button>
           <button class="ghost" onclick="removeBot()" ${botCount===0?'disabled':''}>－ 移除機器人</button>
         </div>` : ''}
+      ${hasScores?`<div class="sub">📊 系列賽進行中（先達 10 分者勝），分數延續累積</div>`:''}
       ${net.isHost
-        ? `<button onclick="hostStart()" ${canStart?'':'disabled'}>${canStart?'開始遊戲':'至少 3 人才能開始…'}</button>`
+        ? `<button onclick="hostStart()" ${canStart?'':'disabled'}>${canStart?(hasScores?'開始下一局':'開始遊戲'):'至少 3 人才能開始…'}</button>`
         : `<div class="sub">等待房主開始遊戲…</div>`}
       <button class="ghost" onclick="leaveRoom()">離開房間</button>
     </div>`;
