@@ -84,7 +84,7 @@
   <h1>🕺 犯人在跳舞</h1>
   <div class="sub">本機同桌 ＆ 線上連線</div>
   <div id="app"></div>
-  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v15 · 犯人獲勝顯示慶祝GIF</div>
+  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v17 · 線上遊戲本體（房主裁判/個人視圖/動作佇列）</div>
   <div id="toast" style="position:fixed;left:50%;bottom:30px;transform:translateX(-50%);
        background:#b02a4a;color:#fff;padding:12px 20px;border-radius:10px;font-size:1rem;
        opacity:0;transition:opacity .2s;pointer-events:none;z-index:99;max-width:90%;"></div>
@@ -120,7 +120,7 @@ const CARDS = {
   trade:       { name:"交易",       desc:"指定一人，你給他一張（你選），盲抽回他一張。" },
   boy:         { name:"少年",       desc:"得知誰是犯人（誰持有犯人牌）。" },
   dog:         { name:"神犬",       desc:"指定一人，由他自己選一張棄掉；若棄到犯人牌你獲勝，否則神犬牌交給他。" },
-  inspector:   { name:"警部",       desc:"公開持有。手牌≤3可打，放在你認為是犯人的人面前；遊戲結束時他若仍持有犯人牌，你獲勝（+3）。" },
+  inspector:   { name:"警部",       desc:"手牌≤3可打，指定一人並公開盯著他；遊戲結束時他若仍持有犯人牌，你獲勝（+3）。（在手上時不公開）" },
   citizen:     { name:"一般人",     desc:"無效果（煙霧彈）。" },
 };
 
@@ -474,17 +474,11 @@ function logHtml(){
   return `<div class="log">${state.log.map(l=>`<div>${l}</div>`).join("")}</div>`;
 }
 
-// 警部是公開資訊：顯示誰持有警部、或警部正盯著誰
+// 警部「打出盯人後」才公開；在手上時不公布持有者
 function inspectorBanner(){
-  if(!state) return '';
-  if(state.inspector){
-    return `<div class="panel center" style="border-color:#ffd34d;padding:10px;margin-top:10px">`+
-      `👮 警部盯著 <b style="color:#ffd34d">${pname(state.inspector.target)}</b>（遊戲結束時結算）</div>`;
-  }
-  const idx=state.players.findIndex(p=>p.hand.includes('inspector'));
-  if(idx>=0) return `<div class="panel center" style="border-color:#ffd34d;padding:10px;margin-top:10px">`+
-      `👮 警部公開在 <b style="color:#ffd34d">${pname(idx)}</b> 手上</div>`;
-  return '';
+  if(!state || !state.inspector) return '';
+  return `<div class="panel center" style="border-color:#ffd34d;padding:10px;margin-top:10px">`+
+    `👮 警部盯著 <b style="color:#ffd34d">${pname(state.inspector.target)}</b>（遊戲結束時結算）</div>`;
 }
 
 // ---------- 出牌主流程 ----------
@@ -511,6 +505,10 @@ window.chooseTarget = (t)=>{
     const me=state.players[state.current];
     me.hand.splice(state.pending.cardIdx,1);
     state.firstMoveDone=true;
+    if(me.hand.length===0){   // 出交易者已無其他牌可給 → 交易落空
+      log(`${me.name} 打出交易，但手上已無其他牌可換。`);
+      state.pending=null; endTurn(); return;
+    }
     state.pending.target=t; state.phase="tradeGive"; render(); return;
   }
   resolveTargeted(card, state.pending.cardIdx, t);
@@ -792,9 +790,14 @@ function renderLanding(){
     </div>`;
 }
 
+function getPlayerId(){
+  let id=null; try{ id=sessionStorage.getItem('cd_pid'); }catch(e){}
+  if(!id){ id='p'+Math.random().toString(36).slice(2,9); try{ sessionStorage.setItem('cd_pid',id); }catch(e){} }
+  return id;
+}
 window.enterOnline=()=>{
   mode='online';
-  net={ phase:'entry', code:null, playerId:'p'+Math.random().toString(36).slice(2,9),
+  net={ phase:'entry', code:null, playerId:getPlayerId(),
         myName:'', isHost:false, room:null };
   render();
 };
@@ -837,6 +840,11 @@ function attachRoom(code){
     net.room=snap.val();
     if(!net.room){ nope('房間已關閉'); leaveRoom(); return; }
     net.isHost = net.room.host===net.playerId;
+    if(net.room.hostLeft){ net.phase='hostLeft'; render(); return; }
+    if(net.room.status==='playing' && net.phase!=='game'){
+      net.phase='game';
+      if(!net.isHost) subscribeGame();
+    }
     render();
   });
 }
@@ -846,10 +854,157 @@ window.leaveRoom=()=>{
   net=null; mode=null; render();
 };
 
-window.hostStart=()=>{ nope('連線對戰本體開發中（大廳已完成）'); };
+// ====== 線上遊戲本體（房主＝裁判，重用單機引擎）======
+
+// 房主開始遊戲：依房內人數發牌、指派座位 pid、開始監聽動作
+window.hostStart=()=>{
+  const ids=Object.keys(net.room.players||{});
+  if(ids.length<3){ nope('至少 3 人才能開始'); return; }
+  const names=ids.map(id=>net.room.players[id].name);
+  newGame(names);                                   // 重用單機引擎建局（內部會 render，此時 phase 仍 lobby）
+  state.players.forEach((p,i)=>{ p.pid=ids[i]; });  // 座位索引 ↔ playerId
+  scores=new Array(names.length).fill(0);
+  WIN_SCORE=winScoreFor(names.length);
+  net.started=true; net.phase='game';
+  const base='rooms/'+net.code;
+  db.ref(base+'/status').set('playing');
+  db.ref(base+'/hostLeft').onDisconnect().set(true);   // 房主離線標記
+  db.ref(base+'/actions').on('child_added', s=>{ const a=s.val(); s.ref.remove(); applyAction(a); });
+  broadcast();
+  render();
+};
+
+// 算出目前該由誰操作、以及該玩家要顯示的操作 UI（線上跳過 pass 遮擋畫面）
+function seatPrompt(){
+  if(state.gameover) return {actor:-1, ui:{kind:'over'}};
+  const ph=state.phase, pend=state.pending||{}, N=state.players.length;
+  const handUI=(i)=>state.players[i].hand.map((c,idx)=>({idx,name:CARDS[c].name,desc:CARDS[c].desc,crime:!!CARDS[c].crime}));
+  if(ph==='pass'||ph==='turn'){
+    const i=state.current;
+    const cards=state.players[i].hand.map((c,idx)=>{ const pl=playable(c); return {idx,name:CARDS[c].name,desc:CARDS[c].desc,crime:!!CARDS[c].crime,ok:pl.ok,why:pl.why||''}; });
+    return {actor:i, ui:{kind:'turn', act:'play', cards}};
+  }
+  if(ph==='target'){
+    const opts=state.players.map((p,idx)=>({idx,name:p.name,n:p.hand.length})).filter(o=>o.idx!==state.current);
+    return {actor:state.current, ui:{kind:'target', act:'target', cardName:CARDS[pend.card].name, options:opts}};
+  }
+  if(ph==='tradeGive') return {actor:state.current, ui:{kind:'pick', act:'tradeGive', title:'交易：選一張給 '+pname(pend.target), cards:handUI(state.current)}};
+  if(ph==='tradePass'||ph==='tradeReceive') return {actor:pend.target, ui:{kind:'pick', act:'tradeReceive', title:'交易：選一張交換給 '+pname(state.current), cards:handUI(pend.target)}};
+  if(ph==='dogPass'||ph==='dogDiscard') return {actor:pend.target, ui:{kind:'pick', act:'dogDiscard', title:'神犬：選一張棄掉', cards:handUI(pend.target)}};
+  if(ph==='infoSwapPass'||ph==='infoSwapPick'){ const i=pend.queue[pend.qi]; return {actor:i, ui:{kind:'pick', act:'infoSwapPick', title:'情報交換：選一張傳給左邊（'+pname((i-1+N)%N)+'）', cards:handUI(i)}}; }
+  if(ph==='reveal') return {actor:state.current, ui:{kind:'reveal', act:'reveal-ack', title:pend.title, body:pend.body}};
+  return {actor:-1, ui:{kind:'wait'}};
+}
+
+function localPub(){
+  const sp=seatPrompt();
+  return {
+    phase:state.phase, current:state.current, actor:sp.actor,
+    log:state.log.slice(0,40), scores:scores.slice(0,state.players.length),
+    players:state.players.map(p=>({name:p.name, n:p.hand.length})),
+    inspectorTarget: state.inspector? state.inspector.target : -1,
+    gameover: state.gameover? {title:state.gameover.title, body:state.gameover.body} : null
+  };
+}
+
+// 房主把狀態寫進 Firebase：public（公開）+ 每人 view（私密手牌＋提示）
+function broadcast(){
+  if(!net || !net.isHost || !net.started || !db) return;
+  const base='rooms/'+net.code, pub=localPub(), sp=seatPrompt();
+  db.ref(base+'/public').set(JSON.parse(JSON.stringify(pub)));
+  state.players.forEach((p,i)=>{
+    const ui = (i===sp.actor)? sp.ui : {kind:'wait', who: sp.actor>=0?pname(sp.actor):''};
+    db.ref(base+'/views/'+p.pid).set(JSON.parse(JSON.stringify({hand:p.hand, ui})));
+  });
+}
+
+// 房主收到動作：驗證來源與型別，再呼叫對應引擎函式
+function applyAction(a){
+  if(!a || !net || !net.isHost || state.gameover) return;
+  const sp=seatPrompt();
+  if(sp.actor<0) return;
+  if(a.by!==state.players[sp.actor].pid) return;   // 只接受「該操作的人」
+  if(a.type!==sp.ui.act) return;                    // 型別需符合當前期待
+  switch(a.type){
+    case 'play': playCard(a.payload); break;
+    case 'target': chooseTarget(a.payload); break;
+    case 'tradeGive': doTradeGive(a.payload); break;
+    case 'tradeReceive': tradeReceiveCard(a.payload); break;
+    case 'dogDiscard': dogDiscard(a.payload); break;
+    case 'infoSwapPick': infoSwapPick(a.payload); break;
+    case 'reveal-ack': afterReveal(); break;
+  }
+  broadcast();
+}
+
+// 玩家送出動作：房主直接套用、其他人 push 到 Firebase
+window.netAct=(type,payload)=>{
+  const a={by:net.playerId, type, payload:(payload===undefined?null:payload), at:Date.now()};
+  if(net.isHost) applyAction(a);
+  else db.ref('rooms/'+net.code+'/actions').push(a);
+};
+
+// 一般玩家：訂閱 public 與自己的 view
+function subscribeGame(){
+  if(net.gameSub) return; net.gameSub=true;
+  const base='rooms/'+net.code;
+  db.ref(base+'/public').on('value', s=>{ net.pub=s.val(); if(net.phase==='game') render(); });
+  db.ref(base+'/views/'+net.playerId).on('value', s=>{ net.view=s.val(); if(net.phase==='game') render(); });
+}
+
+function netGame(){
+  if(net.isHost){
+    broadcast();
+    const sp=seatPrompt();
+    const hi=state.players.findIndex(p=>p.pid===net.playerId);
+    if(hi<0){ app.innerHTML='<div class="panel center">準備中…</div>'; return; }
+    const ui=(hi===sp.actor)? sp.ui : {kind:'wait', who: sp.actor>=0?pname(sp.actor):''};
+    renderGameView(localPub(), {hand:state.players[hi].hand, ui});
+  } else {
+    if(!net.pub){ app.innerHTML='<div class="panel center">載入中…</div>'; return; }
+    renderGameView(net.pub, net.view||{hand:[],ui:{kind:'wait'}});
+  }
+}
+
+function renderGameView(pub, view){
+  if(pub && pub.gameover){ return renderNetGameOver(pub); }
+  const ui=(view&&view.ui)||{kind:'wait'};
+  let area='';
+  if(ui.kind==='turn'){
+    const cards=ui.cards.map(c=>`<div class="card ${c.crime?'crime':''} ${c.ok?'playable':'disabled'}" onclick="${c.ok?`netAct('play',${c.idx})`:`nope('${c.why}')`}"><div class="cname">${c.name}</div><div class="cdesc">${c.desc}</div>${c.ok?'':`<div class="cwhy">✗ ${c.why}</div>`}</div>`).join('');
+    area=`<div class="big">輪到你了</div><div class="hand">${cards}</div>`;
+  } else if(ui.kind==='target'){
+    area=`<div class="big">${ui.cardName}：選擇目標</div>`+ui.options.map(o=>`<button onclick="netAct('target',${o.idx})">${o.name}（${o.n}張）</button>`).join(' ');
+  } else if(ui.kind==='pick'){
+    const cards=ui.cards.map(c=>`<div class="card ${c.crime?'crime':''} playable" onclick="netAct('${ui.act}',${c.idx})"><div class="cname">${c.name}</div><div class="cdesc">${c.desc}</div></div>`).join('');
+    area=`<div class="big">${ui.title}</div><div class="hand">${cards}</div>`;
+  } else if(ui.kind==='reveal'){
+    area=`<div class="big">${ui.title}</div><div style="line-height:1.8">${ui.body}</div><button onclick="netAct('reveal-ack',null)">繼續 ▶</button>`;
+  } else {
+    const myHand=((view&&view.hand)||[]).map(c=>CARDS[c]?CARDS[c].name:c).join('、')||'（空手）';
+    area=`<div class="big">等待 ${ui.who||'其他玩家'}…</div><div class="sub" style="margin-top:8px">你的手牌：${myHand}</div>`;
+  }
+  const strip = pub&&pub.players ? `<div class="sub" style="margin-top:8px">總分　${pub.players.map((p,i)=>p.name+' '+(pub.scores?pub.scores[i]:0)).join('　·　')}</div>` : '';
+  const insp = pub&&pub.inspectorTarget>=0 ? `<div class="panel center" style="border-color:#ffd34d;padding:10px;margin-top:10px">👮 警部盯著 <b style="color:#ffd34d">${pub.players[pub.inspectorTarget].name}</b></div>` : '';
+  const logH = pub&&pub.log ? `<div class="log">${pub.log.map(l=>`<div>${l}</div>`).join('')}</div>` : '';
+  app.innerHTML=`<div class="panel"><div class="sub">房號 ${net.code}</div>${area}${strip}</div>${insp}${logH}`;
+}
+
+function renderNetGameOver(pub){
+  const g=pub.gameover, villain=/逃脫/.test(g.title);
+  const celebrate = villain
+    ? `<img src="https://media.giphy.com/media/8EX8UxSNLRp5AonNfv/giphy.gif" style="max-width:280px;width:80%;border-radius:14px;margin:10px auto;display:block">`
+    : `<div class="dancers"><span>🕺</span><span>💃</span><span>🕺</span><span>💃</span><span>🕺</span></div>`;
+  const rows=pub.players.map((p,i)=>({name:p.name,s:pub.scores?pub.scores[i]:0})).sort((a,b)=>b.s-a.s).map(r=>`<div style="padding:3px 0">${r.name}：<b>${r.s}</b></div>`).join('');
+  app.innerHTML=`<div class="panel win center">${celebrate}<div class="big" style="font-size:1.6rem">🎉 ${g.title}</div><div style="line-height:1.8">${g.body}</div></div>`+
+    `<div class="panel"><div class="big">📊 總分</div>${rows}</div>`+
+    `<div class="panel center"><button onclick="leaveRoom()">回主選單</button></div>`;
+}
 
 function netRender(){
   if(!net){ renderLanding(); return; }
+  if(net.phase==='hostLeft'){ app.innerHTML=`<div class="panel center"><div class="big">房主已離線，遊戲結束</div><button onclick="leaveRoom()">回主選單</button></div>`; return; }
+  if(net.phase==='game') return netGame();
   if(net.phase==='entry') return netEntry();
   return netLobby();
 }
@@ -871,7 +1026,7 @@ function netLobby(){
   const room=net.room||{};
   const entries=room.players?Object.entries(room.players):[];
   const chips=entries.map(([id,p])=>`<span class="badge">${p.name}${id===room.host?' 👑':''}${id===net.playerId?'（你）':''}</span>`).join(' ');
-  const n=entries.length, canStart=net.isHost && n===4;
+  const n=entries.length, canStart=net.isHost && n>=3;
   app.innerHTML=`
     <div class="panel center">
       <div class="big">房號：<span style="color:#ffd34d;letter-spacing:3px">${net.code||''}</span></div>
@@ -881,7 +1036,7 @@ function netLobby(){
       <div class="big">玩家（${n}/4）</div>
       <div style="margin:10px 0">${chips||'（等待加入…）'}</div>
       ${net.isHost
-        ? `<button onclick="hostStart()" ${canStart?'':'disabled'}>${canStart?'開始遊戲':'等待 4 人到齊…'}</button>`
+        ? `<button onclick="hostStart()" ${canStart?'':'disabled'}>${canStart?'開始遊戲':'至少 3 人才能開始…'}</button>`
         : `<div class="sub">等待房主開始遊戲…</div>`}
       <button class="ghost" onclick="leaveRoom()">離開房間</button>
     </div>`;
