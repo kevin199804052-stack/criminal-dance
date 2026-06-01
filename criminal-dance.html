@@ -76,6 +76,10 @@
   .dancers span:nth-child(3){ animation-delay:.24s }
   .dancers span:nth-child(4){ animation-delay:.36s }
   .dancers span:nth-child(5){ animation-delay:.48s }
+  /* 彩蛋煙火 */
+  @keyframes fwburst { 0%{transform:scale(0);opacity:0} 25%{opacity:1} 70%{transform:scale(1.7);opacity:1} 100%{transform:scale(2.2);opacity:0} }
+  .fw { position:fixed; inset:0; pointer-events:none; z-index:95; overflow:hidden; }
+  .fw span { position:absolute; font-size:2.6rem; animation:fwburst 1.3s ease-out infinite; }
 </style>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
@@ -84,7 +88,7 @@
   <h1>🕺 犯人在跳舞</h1>
   <div class="sub">本機同桌 ＆ 線上連線</div>
   <div id="app"></div>
-  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v25 · 記住上次輸入的名字</div>
+  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v27 · 無牌可打彩蛋(煙火+10分勝)/結束離開回輸房號畫面</div>
   <div id="toast" style="position:fixed;left:50%;bottom:30px;transform:translateX(-50%);
        background:#b02a4a;color:#fff;padding:12px 20px;border-radius:10px;font-size:1rem;
        opacity:0;transition:opacity .2s;pointer-events:none;z-index:99;max-width:90%;"></div>
@@ -460,8 +464,9 @@ function renderGameOver(){
     : `<button onclick="nextRound()">下一局（保留總分）▶</button>
        <button class="ghost" onclick="resetAll()">重設分數 / 改玩家</button>`;
   app.innerHTML=`
+    ${g.easter?fireworksHtml():''}
     <div class="panel win center">
-      ${celebrate}
+      ${g.easter?'':celebrate}
       <div class="big" style="font-size:1.8rem">🎉 ${g.title}</div>
       <div style="font-size:1.1rem;line-height:1.9">${g.body}</div>
     </div>
@@ -473,6 +478,12 @@ function renderGameOver(){
 
 function logHtml(){
   return `<div class="log">${state.log.map(l=>`<div>${l}</div>`).join("")}</div>`;
+}
+// 彩蛋煙火特效
+function fireworksHtml(){
+  const e=['🎆','🎇','✨','🎉','🌟']; let s='';
+  for(let i=0;i<18;i++){ s+=`<span style="top:${(Math.random()*80+5).toFixed(0)}%;left:${(Math.random()*90+2).toFixed(0)}%;animation-delay:${(Math.random()*1.3).toFixed(2)}s">${e[i%5]}</span>`; }
+  return `<div class="fw">${s}</div>`;
 }
 
 // 警部「打出盯人後」才公開；在手上時不公布持有者
@@ -716,6 +727,16 @@ window.dogDiscard = (idx)=>{
 };
 
 // ---------- 回合結束 ----------
+// 某座位手上是否「至少有一張可打的牌」
+function hasPlayable(seat){
+  const p=state.players[seat];
+  return p.hand.some(c=>{
+    if(!state.firstMoveDone) return c==='firstFinder';
+    if(c==='criminal') return p.hand.length===1;
+    if(c==='detective'||c==='inspector') return p.hand.length<=3;
+    return true;
+  });
+}
 function endTurn(){
   // 檢查是否還有人有牌
   const total=state.players.reduce((s,p)=>s+p.hand.length,0);
@@ -724,12 +745,21 @@ function endTurn(){
   }
   const nxt=nextActive(state.current);
   if(nxt<0){ gameOver("和局","沒有人還有手牌。"); return; }
+  // 🎆 隱藏彩蛋：輪到的人手上「完全沒有可打的牌」（如 偵探,偵探,警部,犯人）→ 超稀有，直接 +10 分贏整場
+  if(!hasPlayable(nxt)){
+    const pts=new Array(state.players.length).fill(0); pts[nxt]=10;
+    const hand=state.players[nxt].hand.map(c=>CARDS[c].name).join('、');
+    gameOver('🎆 天降好運（隱藏彩蛋）！',
+      `<b>${pname(nxt)}</b> 拿到一手完全打不出去的牌（${hand}），觸發超稀有彩蛋——直接 +10 分、贏得整場！`,
+      pts, true);
+    return;
+  }
   state.current=nxt;
   state.phase="pass";
   render();
 }
 
-function gameOver(title, body, points){
+function gameOver(title, body, points, easter){
   points = (points || [0,0,0,0]).slice();
   // 警部結算：遊戲結束時，被盯的人若仍持有犯人牌 → 比照神犬 +3，與原結局並存（逐人取較高分）
   let inspectorHit=false;
@@ -745,7 +775,7 @@ function gameOver(title, body, points){
   const max=Math.max(...scores);
   const leaders=state.players.map((_,i)=>i).filter(i=>scores[i]===max);
   const matchWinner = (max>=WIN_SCORE && leaders.length===1) ? leaders[0] : null;
-  state.gameover={title, body, points, matchWinner};
+  state.gameover={title, body, points, matchWinner, easter:!!easter};
   // 顯示所有人手牌真相
   const truth=state.players.map(p=>`${p.name}: ${p.hand.map(c=>CARDS[c].name).join("、")||"空手"}`).join("<br>");
   state.gameover.body += `<hr style="border-color:#4a3d80"><div style="font-size:.85rem;color:#b3a8d6">結算時手牌：<br>${truth}</div>`;
@@ -885,6 +915,21 @@ window.leaveRoom=()=>{
     else net.ref.child('players/'+net.playerId).remove();
   }
   net=null; mode=null; render();
+};
+// 離開目前房間，但回到「輸入房號」的畫面（而非主選單），名字保留
+window.leaveToEntry=()=>{
+  clearTurnTimer();
+  const nm = (net&&net.myName) || loadName();
+  if(net&&net.ref&&db){
+    const players=(net.room&&net.room.players)||{};
+    const humansLeft=Object.keys(players).filter(pid=>pid!==net.playerId && !players[pid].bot);
+    net.ref.off();
+    if(humansLeft.length===0) db.ref('rooms/'+net.code).remove();   // 真人退光→關房
+    else net.ref.child('players/'+net.playerId).remove();
+  }
+  mode='online';
+  net={ phase:'entry', code:null, playerId:getPlayerId(), myName:nm, isHost:false, room:null };
+  render();
 };
 
 // ====== 線上遊戲本體（房主＝裁判，重用單機引擎）======
@@ -1037,7 +1082,7 @@ function localPub(){
     log:state.log.slice(0,40), scores:scores.slice(0,state.players.length),
     players:state.players.map(p=>({name:p.name, n:p.hand.length})),
     inspectorTarget: state.inspector? state.inspector.target : -1,
-    gameover: state.gameover? {title:state.gameover.title, body:state.gameover.body, matchWinner:(state.gameover.matchWinner==null?-1:state.gameover.matchWinner)} : null,
+    gameover: state.gameover? {title:state.gameover.title, body:state.gameover.body, matchWinner:(state.gameover.matchWinner==null?-1:state.gameover.matchWinner), easter:!!state.gameover.easter} : null,
     deadline: net.deadline||null, turnLimit: net.turnLimit||30, winScore: WIN_SCORE
   };
 }
@@ -1129,11 +1174,15 @@ function autoPlay(){
     log('情報交換思考超時，未選者自動隨機。'); resolveInfoSwapOnline(); return;
   }
   const sp=seatPrompt(); if(sp.actor<0) return; const ui=sp.ui;
-  log(`${pname(sp.actor)} 思考超時，自動處理。`);
-  if(ui.kind==='turn'){ const ok=ui.cards.filter(c=>c.ok); if(ok.length) playCard(ok[Math.random()*ok.length|0].idx); else endTurn(); }
-  else if(ui.kind==='target'){ chooseTarget(ui.options[Math.random()*ui.options.length|0].idx); }
-  else if(ui.kind==='pick'){ const i=Math.random()*ui.cards.length|0; if(ui.act==='tradeGive')doTradeGive(i); else if(ui.act==='tradeReceive')tradeReceiveCard(i); else if(ui.act==='dogDiscard')dogDiscard(i); }
-  else if(ui.kind==='reveal'){ afterReveal(); }
+  const who=pname(sp.actor);
+  if(ui.kind==='turn'){
+    const ok=ui.cards.filter(c=>c.ok);
+    if(ok.length){ const pick=ok[Math.random()*ok.length|0]; log(`${who} 思考超時，自動打出「${pick.name}」。`); playCard(pick.idx); }
+    else { log(`${who} 思考超時且沒有可打的牌，跳過。`); endTurn(); }
+  }
+  else if(ui.kind==='target'){ const o=ui.options[Math.random()*ui.options.length|0]; log(`${who} 思考超時，自動指定 ${o.name}。`); chooseTarget(o.idx); }
+  else if(ui.kind==='pick'){ const i=Math.random()*ui.cards.length|0; const cn=ui.cards[i]?ui.cards[i].name:''; log(`${who} 思考超時，自動選了「${cn}」。`); if(ui.act==='tradeGive')doTradeGive(i); else if(ui.act==='tradeReceive')tradeReceiveCard(i); else if(ui.act==='dogDiscard')dogDiscard(i); }
+  else if(ui.kind==='reveal'){ log(`${who} 思考超時，自動繼續。`); afterReveal(); }
   broadcast();
 }
 function startCountdownTicker(){
@@ -1209,13 +1258,13 @@ function renderNetGameOver(pub){
   let footer;
   if(g.matchWinner>=0){            // 有人達到門檻 → 系列賽結束
     footer=`<div class="panel win center" style="border-color:#ffd34d"><div class="big" style="font-size:1.7rem;color:#ffd34d">🏆 ${pub.players[g.matchWinner].name} 達 ${target} 分，贏得整場！</div></div>`+
-      `<div class="panel center">`+(net.isHost?`<button onclick="backToLobby(true)">回大廳（開新賽局，分數歸零）</button>`:`<div class="sub">系列賽結束，等待房主</div>`)+`<button class="ghost" onclick="leaveRoom()">離開房間</button></div>`;
+      `<div class="panel center">`+(net.isHost?`<button onclick="backToLobby(true)">回大廳（開新賽局，分數歸零）</button>`:`<div class="sub">系列賽結束，等待房主</div>`)+`<button class="ghost" onclick="leaveToEntry()">離開（回輸房號畫面）</button></div>`;
   } else {                         // 尚未分出整場 → 回大廳續玩(分數保留)
     footer=`<div class="panel center">`+
       (net.isHost ? `<button onclick="backToLobby(false)">再來一局（回大廳，分數續累積）</button>` : `<div class="sub">等待房主再開一局…</div>`)+
-      `<button class="ghost" onclick="leaveRoom()">離開房間</button></div>`;
+      `<button class="ghost" onclick="leaveToEntry()">離開（回輸房號畫面）</button></div>`;
   }
-  app.innerHTML=`<div class="panel win center">${celebrate}<div class="big" style="font-size:1.6rem">🎉 ${g.title}</div><div style="line-height:1.8">${g.body}</div></div>`+
+  app.innerHTML=(g.easter?fireworksHtml():'')+`<div class="panel win center">${g.easter?'':celebrate}<div class="big" style="font-size:1.6rem">🎉 ${g.title}</div><div style="line-height:1.8">${g.body}</div></div>`+
     `<div class="panel"><div class="big">📊 總分（先達 ${target} 分獲勝）</div>${rows}</div>`+footer;
 }
 
