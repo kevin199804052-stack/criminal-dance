@@ -70,7 +70,7 @@
   <h1>🕺 犯人在跳舞</h1>
   <div class="sub">本機同桌 ＆ 線上連線</div>
   <div id="app"></div>
-  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v11 · 情報交換改每人自選傳左</div>
+  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v13 · 多人 3–8 人（依人數建牌+引擎一般化）</div>
   <div id="toast" style="position:fixed;left:50%;bottom:30px;transform:translateX(-50%);
        background:#b02a4a;color:#fff;padding:12px 20px;border-radius:10px;font-size:1rem;
        opacity:0;transition:opacity .2s;pointer-events:none;z-index:99;max-width:90%;"></div>
@@ -106,36 +106,63 @@ const CARDS = {
   trade:       { name:"交易",       desc:"指定一人，你給他一張（你選），盲抽回他一張。" },
   boy:         { name:"少年",       desc:"得知誰是犯人（誰持有犯人牌）。" },
   dog:         { name:"神犬",       desc:"指定一人，由他自己選一張棄掉；若棄到犯人牌你獲勝，否則神犬牌交給他。" },
+  inspector:   { name:"警部",       desc:"公開持有。手牌≤3可打，放在你認為是犯人的人面前；遊戲結束時他若仍持有犯人牌，你獲勝（+3）。" },
   citizen:     { name:"一般人",     desc:"無效果（煙霧彈）。" },
 };
 
-// 4人用 16 張牌組（含5張必備牌 + 11張）
-const DECK = [
-  "firstFinder",
-  "criminal",
-  "detective","detective",
-  "alibi","alibi",
-  "accomplice",
-  "witness",
-  "infoManip",
-  "rumor","rumor",
-  "trade","trade",
-  "boy",
-  "dog",
-  "citizen",
-];
+// 標準 32 張卡池（各卡最大張數）
+const CARD_POOL = { firstFinder:1, criminal:1, detective:4, alibi:5, accomplice:2,
+  witness:3, infoManip:3, rumor:4, trade:5, boy:1, dog:1, citizen:2 };
+// 依人數的必要牌（其餘從牌池隨機補滿到 人數×4）
+const MANDATORY = {
+  3:{ detective:1, alibi:1 },                  // 3人不放共犯
+  4:{ detective:1, alibi:1, accomplice:1 },
+  5:{ detective:1, alibi:2, accomplice:1 },
+  6:{ detective:2, alibi:2, accomplice:2 },
+  7:{ detective:2, alibi:3, accomplice:2 },
+};
+// 依人數組牌（N=玩家數）；withInspector=true 時用警部替換一張神犬
+function buildDeck(N, withInspector){
+  const total=N*4; let deck=[];
+  if(N>=8){
+    for(const c in CARD_POOL) for(let k=0;k<CARD_POOL[c];k++) deck.push(c);  // 8人=全32張
+  } else {
+    deck.push("firstFinder","criminal");
+    const m=MANDATORY[N]||{};
+    for(const c in m) for(let k=0;k<m[c];k++) deck.push(c);
+    const used={}; deck.forEach(c=>used[c]=(used[c]||0)+1);
+    let bag=[];
+    for(const c in CARD_POOL){
+      if(c==="firstFinder"||c==="criminal") continue;     // 固定各1張
+      if(N===3 && c==="accomplice") continue;             // 3人不放共犯
+      for(let k=0;k<CARD_POOL[c]-(used[c]||0);k++) bag.push(c);
+    }
+    bag=shuffle(bag);
+    while(deck.length<total && bag.length) deck.push(bag.pop());
+  }
+  if(withInspector){
+    let i=deck.indexOf("dog"); if(i<0) i=deck.indexOf("citizen");
+    if(i>=0) deck[i]="inspector";   // 替換一張神犬（無則替換一般人，再無則略過）
+  }
+  return shuffle(deck);
+}
 
 let state = null;
 let scores = [0,0,0,0];     // 跨局累積總分
 let playerNames = null;     // 記住玩家名字，下一局沿用
 let WIN_SCORE = 10;         // 賽末門檻：累積總分先達此分且為唯一最高者，贏得整場
 let mode = null;            // null=主選單 / 'local'=本機同桌 / 'online'=線上連線
+let withInspector = true;   // 是否加入警部牌（替換一張神犬）
+let setupCount = 4;         // 設定畫面選的人數
+let setupNames = null;      // 設定畫面暫存的名字
+function winScoreFor(n){ return n<=5 ? 5 : 10; }   // 賽末門檻隨人數
 const app = document.getElementById("app");
 
 // 依結局計算本局各人得分（回傳長度4陣列）
 function pointsFor(type, winnerIdx, criminalIdx){
-  const pts=[0,0,0,0];
-  for(let i=0;i<4;i++){
+  const N=state.players.length;
+  const pts=new Array(N).fill(0);
+  for(let i=0;i<N;i++){
     const isVillain = (i===criminalIdx) || state.players[i].accomplice;
     if(type==='escape'){ pts[i]= isVillain?2:0; }       // 犯人逃脫：犯人+共犯各+2
     else if(i===winnerIdx){ pts[i]= (type==='dog'?3:2); } // 神犬+3 / 偵探+2
@@ -150,14 +177,15 @@ function shuffle(a){ a=[...a]; for(let i=a.length-1;i>0;i--){const j=Math.random
 function log(msg){ state.log.unshift(msg); }
 function pname(i){ return state.players[i].name; }
 function nextActive(from){
-  for(let k=1;k<=4;k++){ const i=(from+k)%4; if(state.players[i].hand.length>0) return i; }
+  const N=state.players.length;
+  for(let k=1;k<=N;k++){ const i=(from+k)%N; if(state.players[i].hand.length>0) return i; }
   return -1; // 沒人有牌
 }
 function holderOfCriminal(){ return state.players.findIndex(p=>p.hand.includes("criminal")); }
 
 // ---------- 開新局 ----------
 function newGame(names){
-  const deck = shuffle(DECK);
+  const deck = buildDeck(names.length, withInspector);
   const players = names.map((n,i)=>({
     name:n, hand:deck.slice(i*4,i*4+4), accomplice:false
   }));
@@ -165,6 +193,7 @@ function newGame(names){
   state = {
     players, current:starter, firstMoveDone:false,
     phase:"pass", log:[], pending:null, gameover:null,
+    inspector:null,   // 警部：{by:出牌者, target:被盯的人}，遊戲結束時結算
   };
   log(`遊戲開始！由持有「第一發現者」的 ${players[starter].name} 先手。`);
   render();
@@ -180,6 +209,7 @@ function playable(card){
   }
   if(card==="criminal" && p.hand.length!==1) return {ok:false, why:"只能在最後一張時打出"};
   if(card==="detective" && p.hand.length>3) return {ok:false, why:"手牌需≤3張"};
+  if(card==="inspector" && p.hand.length>3) return {ok:false, why:"手牌需≤3張"};
   return {ok:true};
 }
 
@@ -203,12 +233,28 @@ function render(){
   }
 }
 
+function captureSetupNames(){
+  const a=[]; for(let i=0;i<setupCount;i++){ const el=document.getElementById('n'+i); if(el)a.push(el.value); }
+  setupNames=a;
+}
 function renderSetup(){
-  const defs = playerNames || ["Erica04","一直委曲求全","微末狂龍","挖玨機"];
+  const defs = setupNames || playerNames || ["Erica04","一直委曲求全","微末狂龍","挖玨機"];
+  const opts=[3,4,5,6,7,8].map(n=>`<option value="${n}" ${n===setupCount?'selected':''}>${n} 人</option>`).join("");
+  let inputs="";
+  for(let i=0;i<setupCount;i++){
+    const v = defs[i]!==undefined ? defs[i] : ('玩家'+(i+1));
+    inputs += `<input id="n${i}" placeholder="玩家 ${i+1}" value="${v}">`;
+  }
   app.innerHTML = `
     <div class="panel">
-      <div class="big">輸入 4 位玩家名字</div>
-      ${defs.map((n,i)=>`<input id="n${i}" placeholder="玩家 ${i+1}" value="${n}">`).join("")}
+      <div class="big">本機同桌</div>
+      <label>人數：
+        <select id="pcount" onchange="captureSetupNames();setupCount=+this.value;render()" style="font-size:1rem;padding:6px;border-radius:8px">${opts}</select>
+      </label>
+      <label style="display:block;margin:10px 0">
+        <input type="checkbox" id="useInspector" ${withInspector?'checked':''} onchange="withInspector=this.checked"> 加入警部牌（替換一張神犬）
+      </label>
+      ${inputs}
       <button onclick="startGame()">開始遊戲</button>
       <button class="ghost" onclick="mode=null;render()">← 回主選單</button>
     </div>
@@ -222,9 +268,12 @@ function renderSetup(){
     </div>`;
 }
 window.startGame = ()=>{
-  const names=[0,1,2,3].map(i=>document.getElementById("n"+i).value.trim()||("玩家"+(i+1)));
-  playerNames = names;
-  scores = [0,0,0,0];     // 新一輪比賽，分數歸零
+  const count=setupCount;
+  const names=[]; for(let i=0;i<count;i++){ const el=document.getElementById("n"+i); names.push((el&&el.value.trim())||("玩家"+(i+1))); }
+  withInspector = document.getElementById("useInspector").checked;
+  playerNames = names; setupNames = names;
+  scores = new Array(count).fill(0);   // 新一輪比賽，分數歸零（長度＝人數）
+  WIN_SCORE = winScoreFor(count);      // 賽末門檻隨人數
   newGame(names);
 };
 window.nextRound = ()=>{ newGame(playerNames); };               // 保留總分，重新發牌
@@ -239,6 +288,7 @@ function renderPass(){
       <button onclick="state.phase='turn';render()">我是 ${pname(state.current)}，開始回合</button>
       ${scoreStrip()}
     </div>
+    ${inspectorBanner()}
     ${logHtml()}`;
 }
 
@@ -259,6 +309,7 @@ function renderTurn(){
       <div class="sub">手牌 ${p.hand.length} 張 · 點一張可打出的牌</div>
       <div class="hand">${cards}</div>
     </div>
+    ${inspectorBanner()}
     ${logHtml()}`;
 }
 
@@ -354,7 +405,7 @@ function renderInfoSwapPass(){
 }
 
 function renderInfoSwapPick(){
-  const p=state.pending, cur=p.queue[p.qi], hand=state.players[cur].hand;
+  const p=state.pending, cur=p.queue[p.qi], hand=state.players[cur].hand, N=state.players.length;
   const cards=hand.map((c,idx)=>`
      <div class="card ${CARDS[c].crime?'crime':''} playable" onclick="infoSwapPick(${idx})">
        <div class="cname">${CARDS[c].name}</div>
@@ -362,7 +413,7 @@ function renderInfoSwapPick(){
      </div>`).join("");
   app.innerHTML=`
     <div class="panel">
-      <div class="big">${pname(cur)}：選一張傳給左邊（傳給 ${pname((cur+3)%4)}）</div>
+      <div class="big">${pname(cur)}：選一張傳給左邊（傳給 ${pname((cur+N-1)%N)}）</div>
       <div class="hand">${cards}</div>
     </div>${logHtml()}`;
 }
@@ -403,6 +454,19 @@ function logHtml(){
   return `<div class="log">${state.log.map(l=>`<div>${l}</div>`).join("")}</div>`;
 }
 
+// 警部是公開資訊：顯示誰持有警部、或警部正盯著誰
+function inspectorBanner(){
+  if(!state) return '';
+  if(state.inspector){
+    return `<div class="panel center" style="border-color:#ffd34d;padding:10px;margin-top:10px">`+
+      `👮 警部盯著 <b style="color:#ffd34d">${pname(state.inspector.target)}</b>（遊戲結束時結算）</div>`;
+  }
+  const idx=state.players.findIndex(p=>p.hand.includes('inspector'));
+  if(idx>=0) return `<div class="panel center" style="border-color:#ffd34d;padding:10px;margin-top:10px">`+
+      `👮 警部公開在 <b style="color:#ffd34d">${pname(idx)}</b> 手上</div>`;
+  return '';
+}
+
 // ---------- 出牌主流程 ----------
 window.playCard = (idx)=>{
   const p=state.players[state.current];
@@ -410,7 +474,7 @@ window.playCard = (idx)=>{
   if(!playable(card).ok) return;
 
   // 需要選目標的牌：先進入選目標階段（牌還沒移除）
-  if(["detective","witness","trade","dog"].includes(card)){
+  if(["detective","witness","trade","dog","inspector"].includes(card)){
     state.pending={card, cardIdx:idx};
     state.phase="target"; render(); return;
   }
@@ -505,7 +569,7 @@ function resolveSimple(card, idx){
 
 // 情報交換：依序讓每位有手牌的玩家自選一張，全部選完後同時傳給左邊
 function startInfoSwap(){
-  const queue=[0,1,2,3].filter(i=>state.players[i].hand.length>0);
+  const queue=state.players.map((_,i)=>i).filter(i=>state.players[i].hand.length>0);
   if(queue.length===0){ log(`「情報交換」：沒有人有手牌可傳。`); endTurn(); return; }
   state.pending={ type:'infoSwap', queue, qi:0, picks:{} };
   state.phase='infoSwapPass'; render();
@@ -515,22 +579,24 @@ window.infoSwapPick=(idx)=>{
   p.picks[cur]=state.players[cur].hand[idx];   // 記下選的牌
   p.qi++;
   if(p.qi<p.queue.length){ state.phase='infoSwapPass'; render(); return; }
-  // 全部選完 → 先全部抽離，再同時發給各自左邊（i 的左邊 = (i+3)%4）
+  // 全部選完 → 先全部抽離，再同時發給各自左邊（i 的左邊 = (i-1+N)%N）
+  const N=state.players.length;
   Object.entries(p.picks).forEach(([i,card])=>{ removeCard(state.players[i], card); });
-  Object.entries(p.picks).forEach(([i,card])=>{ state.players[((+i)+3)%4].hand.push(card); });
+  Object.entries(p.picks).forEach(([i,card])=>{ state.players[((+i)+N-1)%N].hand.push(card); });
   log(`「情報交換」：全體各自選一張傳給了左邊。`);
   state.pending=null; endTurn();
 };
 function doRumor(){
   // 每人從右邊(i+1)盲抽一張，用 snapshot 同時進行
+  const N=state.players.length;
   const snap=state.players.map(p=>[...p.hand]);
   const taken=state.players.map(()=>null);
   state.players.forEach((p,i)=>{
-    const right=(i+1)%4; const rh=snap[right];
+    const right=(i+1)%N; const rh=snap[right];
     if(rh.length){ taken[i]=rh[Math.random()*rh.length|0]; }
   });
   // 移除被抽走的（注意可能重複類型，逐一移除一張）
-  taken.forEach((c,i)=>{ if(c!==null) removeCard(state.players[(i+1)%4], c); });
+  taken.forEach((c,i)=>{ if(c!==null) removeCard(state.players[(i+1)%N], c); });
   taken.forEach((c,i)=>{ if(c!==null) state.players[i].hand.push(c); });
 }
 
@@ -580,6 +646,13 @@ function resolveTargeted(card, idx, t){
       state.phase="dogPass"; render();
       break;
     }
+    case "inspector":{
+      // 不立即結算：放在 tp 面前，記錄起來，遊戲結束時於 gameOver 結算
+      state.inspector={ by:state.current, target:t };
+      log(`${me.name} 打出警部，公開盯上了 ${tp.name}（將於遊戲結束結算）。`);
+      endTurn();
+      break;
+    }
   }
 }
 
@@ -625,11 +698,20 @@ function endTurn(){
 }
 
 function gameOver(title, body, points){
-  points = points || [0,0,0,0];
+  points = (points || [0,0,0,0]).slice();
+  // 警部結算：遊戲結束時，被盯的人若仍持有犯人牌 → 比照神犬 +3，與原結局並存（逐人取較高分）
+  let inspectorHit=false;
+  if(state.inspector && state.players[state.inspector.target] &&
+     state.players[state.inspector.target].hand.includes("criminal")){
+    inspectorHit=true;
+    const ip=pointsFor('dog', state.inspector.by, state.inspector.target);
+    points = points.map((p,i)=>Math.max(p, ip[i]));
+    body += `<br>👮 警部 ${pname(state.inspector.by)} 指認 ${pname(state.inspector.target)} 成功！（+3）`;
+  }
   points.forEach((pt,i)=>{ scores[i]+=pt; });   // 計入累積總分
   // 賽末判定：累積最高分達門檻、且為「唯一」最高者 → 贏得整場；同分並列則續賽
   const max=Math.max(...scores);
-  const leaders=[0,1,2,3].filter(i=>scores[i]===max);
+  const leaders=state.players.map((_,i)=>i).filter(i=>scores[i]===max);
   const matchWinner = (max>=WIN_SCORE && leaders.length===1) ? leaders[0] : null;
   state.gameover={title, body, points, matchWinner};
   // 顯示所有人手牌真相
