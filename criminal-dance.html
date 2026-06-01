@@ -84,7 +84,7 @@
   <h1>🕺 犯人在跳舞</h1>
   <div class="sub">本機同桌 ＆ 線上連線</div>
   <div id="app"></div>
-  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v24 · 交易單向修正/再來一局回大廳累積分數</div>
+  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v25 · 記住上次輸入的名字</div>
   <div id="toast" style="position:fixed;left:50%;bottom:30px;transform:translateX(-50%);
        background:#b02a4a;color:#fff;padding:12px 20px;border-radius:10px;font-size:1rem;
        opacity:0;transition:opacity .2s;pointer-events:none;z-index:99;max-width:90%;"></div>
@@ -809,10 +809,12 @@ function getPlayerId(){
   if(!id){ id='p'+Math.random().toString(36).slice(2,9); try{ sessionStorage.setItem('cd_pid',id); }catch(e){} }
   return id;
 }
+function loadName(){ try{ return localStorage.getItem('cd_name')||''; }catch(e){ return ''; } }   // 記住上次輸入的名字
+function saveName(n){ try{ localStorage.setItem('cd_name', n); }catch(e){} }
 window.enterOnline=()=>{
   mode='online';
   net={ phase:'entry', code:null, playerId:getPlayerId(),
-        myName:'', isHost:false, room:null };
+        myName:loadName(), isHost:false, room:null };
   render();
 };
 
@@ -821,7 +823,7 @@ function genCode(){ const a='ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let s=''; for(le
 window.createRoom=async ()=>{
   const name=(document.getElementById('myname').value||'').trim();
   if(!name){ nope('請先輸入你的名字'); return; }
-  net.myName=name; net.isHost=true; fbInit();
+  net.myName=name; saveName(name); net.isHost=true; fbInit();
   const code=genCode(); net.code=code;
   await db.ref('rooms/'+code).set({
     host: net.playerId, status:'lobby',
@@ -836,7 +838,7 @@ window.joinRoom=async ()=>{
   const code=(document.getElementById('roomcode').value||'').trim().toUpperCase();
   if(!name){ nope('請先輸入你的名字'); return; }
   if(code.length!==4){ nope('房號是 4 個字'); return; }
-  net.myName=name; net.code=code; fbInit();
+  net.myName=name; saveName(name); net.code=code; fbInit();
   const roomRef=db.ref('rooms/'+code);
   const room=(await roomRef.once('value')).val();
   if(!room){ nope('找不到這個房間'); return; }
