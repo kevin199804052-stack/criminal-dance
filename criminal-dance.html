@@ -88,7 +88,7 @@
   <h1>🕺 犯人在跳舞</h1>
   <div class="sub">本機同桌 ＆ 線上連線</div>
   <div id="app"></div>
-  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v27 · 無牌可打彩蛋(煙火+10分勝)/結束離開回輸房號畫面</div>
+  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v28 · 非房主也能按再來一局回大廳</div>
   <div id="toast" style="position:fixed;left:50%;bottom:30px;transform:translateX(-50%);
        background:#b02a4a;color:#fff;padding:12px 20px;border-radius:10px;font-size:1rem;
        opacity:0;transition:opacity .2s;pointer-events:none;z-index:99;max-width:90%;"></div>
@@ -956,12 +956,14 @@ window.hostStart=()=>{
   broadcast();
   render();
 };
-// reset=true：清空累積分數（開新賽局）；否則保留分數回大廳，由房主再按開始續玩
+// reset=true：清空累積分數（開新賽局，房主限定）；否則保留分數回大廳
 window.backToLobby=(reset)=>{
   if(!net||!net.isHost||!db) return;
   if(reset){ db.ref('rooms/'+net.code+'/scores').remove(); scores=[]; }
   db.ref('rooms/'+net.code+'/status').set('lobby');
 };
+// 任何人都能按「再來一局」→ 全體回大廳（分數保留），再由房主按開始
+window.toLobby=()=>{ if(net&&db) db.ref('rooms/'+net.code+'/status').set('lobby'); };
 // 機器人：房主在大廳新增/移除（機器人由房主端自動隨機出牌）
 window.addBot=()=>{
   if(!net||!net.isHost||!db) return;
@@ -1259,9 +1261,10 @@ function renderNetGameOver(pub){
   if(g.matchWinner>=0){            // 有人達到門檻 → 系列賽結束
     footer=`<div class="panel win center" style="border-color:#ffd34d"><div class="big" style="font-size:1.7rem;color:#ffd34d">🏆 ${pub.players[g.matchWinner].name} 達 ${target} 分，贏得整場！</div></div>`+
       `<div class="panel center">`+(net.isHost?`<button onclick="backToLobby(true)">回大廳（開新賽局，分數歸零）</button>`:`<div class="sub">系列賽結束，等待房主</div>`)+`<button class="ghost" onclick="leaveToEntry()">離開（回輸房號畫面）</button></div>`;
-  } else {                         // 尚未分出整場 → 回大廳續玩(分數保留)
+  } else {                         // 尚未分出整場 → 任何人都能按「再來一局」回大廳(分數保留)
     footer=`<div class="panel center">`+
-      (net.isHost ? `<button onclick="backToLobby(false)">再來一局（回大廳，分數續累積）</button>` : `<div class="sub">等待房主再開一局…</div>`)+
+      `<button onclick="toLobby()">再來一局（回大廳，分數續累積）</button>`+
+      (net.isHost?'':`<div class="sub" style="margin-top:6px">回大廳後由房主按開始</div>`)+
       `<button class="ghost" onclick="leaveToEntry()">離開（回輸房號畫面）</button></div>`;
   }
   app.innerHTML=(g.easter?fireworksHtml():'')+`<div class="panel win center">${g.easter?'':celebrate}<div class="big" style="font-size:1.6rem">🎉 ${g.title}</div><div style="line-height:1.8">${g.body}</div></div>`+
