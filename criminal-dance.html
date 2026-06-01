@@ -84,7 +84,7 @@
   <h1>🕺 犯人在跳舞</h1>
   <div class="sub">本機同桌 ＆ 線上連線</div>
   <div id="app"></div>
-  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v20 · 思考時間限制（超時自動出牌/30→10→30秒）</div>
+  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v23 · 真人退光只剩機器人時自動關房</div>
   <div id="toast" style="position:fixed;left:50%;bottom:30px;transform:translateX(-50%);
        background:#b02a4a;color:#fff;padding:12px 20px;border-radius:10px;font-size:1rem;
        opacity:0;transition:opacity .2s;pointer-events:none;z-index:99;max-width:90%;"></div>
@@ -154,9 +154,10 @@ function buildDeck(N, withInspector){
     bag=shuffle(bag);
     while(deck.length<total && bag.length) deck.push(bag.pop());
   }
-  if(withInspector){
-    let i=deck.indexOf("dog"); if(i<0) i=deck.indexOf("citizen");
-    if(i>=0) deck[i]="inspector";   // 替換一張神犬（無則替換一般人，再無則略過）
+  if(withInspector && deck.indexOf("inspector")<0){
+    let i=deck.indexOf("citizen");                                  // 優先替換一般人，保留神犬→兩者共存
+    if(i<0) i=deck.findIndex(c=>c!=="dog"&&c!=="criminal"&&c!=="firstFinder");
+    if(i>=0) deck[i]="inspector";
   }
   return shuffle(deck);
 }
@@ -509,7 +510,9 @@ window.chooseTarget = (t)=>{
       log(`${me.name} 打出交易，但手上已無其他牌可換。`);
       state.pending=null; endTurn(); return;
     }
-    state.pending.target=t; state.phase="tradeGive"; render(); return;
+    state.pending.target=t;
+    if(mode==='online') state.pending.tradePicks={};   // 線上：雙方同時選；本機維持逐一(tradeGive→tradeReceive)
+    state.phase="tradeGive"; render(); return;
   }
   resolveTargeted(card, state.pending.cardIdx, t);
 };
@@ -573,7 +576,17 @@ function resolveSimple(card, idx){
       endTurn(); break;
     }
     case "criminal":{
-      // 只有最後一張能打 → 逃脫成功
+      // 警部一直盯著這位「犯人本人」→ 打出犯人牌的當下身分即犯人，警部當場逮捕（官方：遊戲結束時該玩家是犯人則警部勝）
+      if(state.inspector && state.inspector.target===state.current){
+        const by=state.inspector.by;
+        log(`${me.name} 想打出犯人牌逃脫，但被警部 ${pname(by)} 盯住，當場被捕！`);
+        gameOver("警部當場逮捕！",
+          `<b>${pname(by)}</b> 的警部盯住了犯人 <b>${me.name}</b>，逃脫失敗、當場被捕！<br>`+
+          `🏆 警部 +3，其他平民 +1，犯人陣營 0。`,
+          pointsFor('dog', by, state.current));
+        break;
+      }
+      // 否則：只有最後一張能打 → 逃脫成功
       const accs=state.players.filter(p=>p.accomplice).map(p=>p.name);
       gameOver("犯人逃脫成功！",
         `<b>${me.name}</b> 成功把犯人牌留到最後打出，逃之夭夭！<br>`+
@@ -826,7 +839,7 @@ window.joinRoom=async ()=>{
   const room=(await roomRef.once('value')).val();
   if(!room){ nope('找不到這個房間'); return; }
   if(room.status!=='lobby'){ nope('遊戲已開始，無法加入'); return; }
-  if(room.players && Object.keys(room.players).length>=4){ nope('房間已滿（4人）'); return; }
+  if(room.players && Object.keys(room.players).length>=8){ nope('房間已滿（最多 8 人）'); return; }
   await roomRef.child('players/'+net.playerId).set({ name, joinedAt: firebase.database.ServerValue.TIMESTAMP });
   attachRoom(code);
 };
@@ -841,8 +854,10 @@ function attachRoom(code){
     // 房主不在了 → 由剩餘玩家中 id 最小者負責「隨機」指派一位新房主（單一寫入避免衝突）
     const pids=net.room.players?Object.keys(net.room.players):[];
     if(pids.length>0 && !pids.includes(net.room.host)){
-      if([...pids].sort()[0]===net.playerId){
-        roomRef.child('host').set(pids[Math.floor(Math.random()*pids.length)]);
+      const realPids=pids.filter(p=>!net.room.players[p].bot);   // 機器人不能當房主
+      if(realPids.length===0){ nope('房間已無真人，關閉'); leaveRoom(); return; }
+      if([...realPids].sort()[0]===net.playerId){
+        roomRef.child('host').set(realPids[Math.floor(Math.random()*realPids.length)]);
       }
       return; // 等 host 欄位更新後此監聽會再次觸發
     }
@@ -858,24 +873,31 @@ function attachRoom(code){
 
 window.leaveRoom=()=>{
   clearTurnTimer();
-  if(net&&net.ref){ net.ref.off(); net.ref.child('players/'+net.playerId).remove(); }
+  if(net&&net.ref&&db){
+    const players=(net.room&&net.room.players)||{};
+    const humansLeft=Object.keys(players).filter(pid=>pid!==net.playerId && !players[pid].bot);
+    net.ref.off();
+    if(humansLeft.length===0) db.ref('rooms/'+net.code).remove();   // 真人都退光（只剩機器人/沒人）→ 關閉整個房間
+    else net.ref.child('players/'+net.playerId).remove();
+  }
   net=null; mode=null; render();
 };
 
 // ====== 線上遊戲本體（房主＝裁判，重用單機引擎）======
 
 // 房主開始遊戲：依房內人數發牌、指派座位 pid、開始監聽動作
-window.hostStart=()=>{
+window.hostStart=(isRematch)=>{
   const ids=Object.keys(net.room.players||{});
   if(ids.length<3){ nope('至少 3 人才能開始'); return; }
   const names=ids.map(id=>net.room.players[id].name);
   newGame(names);                                   // 重用單機引擎建局（內部會 render，此時 phase 仍 lobby）
-  state.players.forEach((p,i)=>{ p.pid=ids[i]; });  // 座位索引 ↔ playerId
-  scores=new Array(names.length).fill(0);
-  WIN_SCORE=winScoreFor(names.length);
+  state.players.forEach((p,i)=>{ p.pid=ids[i]; p.bot=!!net.room.players[ids[i]].bot; });  // 座位 ↔ playerId、機器人標記
+  if(!isRematch || scores.length!==names.length) scores=new Array(names.length).fill(0);  // 再來一局：分數續累積
+  WIN_SCORE=10;            // 線上系列賽門檻：先達 10 分者獲勝（常見預設，可調）
   net.started=true; net.phase='game';
   net.turnLimit=30; net.timer=null; net.timerSig=null; net.deadline=null;   // 思考時間初始 30 秒
   const base='rooms/'+net.code;
+  db.ref(base+'/rematch').remove();        // 清空「再來一局」投票
   db.ref(base+'/status').set('playing');
   db.ref(base+'/status').onDisconnect().set('lobby');   // 房主離線→結束本局回大廳（搭配房主轉移）
   if(!net.actionsAttached){
@@ -886,6 +908,47 @@ window.hostStart=()=>{
   render();
 };
 window.backToLobby=()=>{ if(net&&net.isHost&&db) db.ref('rooms/'+net.code+'/status').set('lobby'); };
+window.voteRematch=()=>{ if(net&&db) db.ref('rooms/'+net.code+'/rematch/'+net.playerId).set(true); };
+window.hostRematch=()=>{ window.hostStart(true); };
+// 機器人：房主在大廳新增/移除（機器人由房主端自動隨機出牌）
+window.addBot=()=>{
+  if(!net||!net.isHost||!db) return;
+  const players=net.room.players||{};
+  if(Object.keys(players).length>=8){ nope('已達 8 人上限'); return; }
+  const used=Object.keys(players).filter(k=>k.startsWith('bot')).map(k=>+k.slice(3));
+  let n=1; while(used.includes(n)) n++;
+  db.ref('rooms/'+net.code+'/players/bot'+n).set({ name:'機器人'+n, bot:true, joinedAt:Date.now() });
+};
+window.removeBot=()=>{
+  if(!net||!net.isHost||!db) return;
+  const botKeys=Object.keys(net.room.players||{}).filter(k=>k.startsWith('bot'));
+  if(botKeys.length) db.ref('rooms/'+net.code+'/players/'+botKeys[botKeys.length-1]).remove();
+};
+function isBot(seat){ return state.players[seat] && state.players[seat].bot; }
+// 房主端：若此刻該行動者是機器人，延遲後自動隨機處理（一次一個，靠廣播連鎖）
+function botTick(){
+  if(!net||!net.isHost||!net.started||state.gameover||net.botTimer) return;
+  let job=null;
+  if(tradeCollecting()){
+    const a=state.current,b=state.pending.target;
+    const s=[a,b].find(x=>isBot(x)&&state.players[x].hand.length>0&&state.pending.tradePicks[x]===undefined);
+    if(s!=null){ const h=state.players[s].hand; job=()=>applyAction({by:state.players[s].pid,type:'tradePick',payload:h.length>0?(Math.random()*h.length|0):0}); }
+  } else if(infoCollecting()){
+    const s=state.pending.queue.find(x=>isBot(x)&&state.pending.picks[x]===undefined);
+    if(s!=null){ const h=state.players[s].hand; job=()=>applyAction({by:state.players[s].pid,type:'infoSwapPick',payload:Math.random()*h.length|0}); }
+  } else {
+    const sp=seatPrompt();
+    if(sp.actor>=0 && isBot(sp.actor)) job=()=>botAct(sp);
+  }
+  if(job) net.botTimer=setTimeout(()=>{ net.botTimer=null; job(); }, 900);
+}
+function botAct(sp){
+  const pid=state.players[sp.actor].pid, ui=sp.ui;
+  if(ui.kind==='turn'){ const ok=ui.cards.filter(c=>c.ok); if(ok.length) applyAction({by:pid,type:'play',payload:ok[Math.random()*ok.length|0].idx}); }
+  else if(ui.kind==='target'){ applyAction({by:pid,type:'target',payload:ui.options[Math.random()*ui.options.length|0].idx}); }
+  else if(ui.kind==='pick'){ applyAction({by:pid,type:ui.act,payload:Math.random()*ui.cards.length|0}); }
+  else if(ui.kind==='reveal'){ applyAction({by:pid,type:'reveal-ack',payload:null}); }
+}
 
 // 算出目前該由誰操作、以及該玩家要顯示的操作 UI（線上跳過 pass 遮擋畫面）
 function seatPrompt(){
@@ -912,11 +975,20 @@ function seatPrompt(){
 function cardListFor(i){
   return state.players[i].hand.map((c,idx)=>({idx,name:CARDS[c].name,desc:CARDS[c].desc,crime:!!CARDS[c].crime}));
 }
-// 線上：情報交換是「全體同時選、同時傳」。算出某座位此刻的視圖（含此特例）
+// 線上「同時選牌」的兩種情境
+function infoCollecting(){ return (state.phase==='infoSwapPass'||state.phase==='infoSwapPick') && state.pending && state.pending.type==='infoSwap'; }
+function tradeCollecting(){ return state.phase==='tradeGive' && state.pending && state.pending.tradePicks; }
+// 算出某座位此刻的視圖（含情報交換/交易的同時選牌特例）
 function viewForSeat(i){
   const p=state.players[i], N=state.players.length;
-  const collecting=(state.phase==='infoSwapPass'||state.phase==='infoSwapPick') && state.pending && state.pending.type==='infoSwap';
-  if(collecting){
+  if(tradeCollecting()){
+    const a=state.current, b=state.pending.target;
+    if((i===a||i===b) && p.hand.length>0 && state.pending.tradePicks[i]===undefined){
+      return {hand:p.hand, ui:{kind:'pick', act:'tradePick', title:'交易：選一張與 '+pname(i===a?b:a)+' 交換', cards:cardListFor(i)}};
+    }
+    return {hand:p.hand, ui:{kind:'wait', who:'雙方交換選牌中…'}};
+  }
+  if(infoCollecting()){
     if(state.pending.queue.includes(i) && state.pending.picks[i]===undefined){
       return {hand:p.hand, ui:{kind:'pick', act:'infoSwapPick', title:'情報交換：選一張傳給左邊（'+pname((i-1+N)%N)+'）', cards:cardListFor(i)}};
     }
@@ -926,6 +998,17 @@ function viewForSeat(i){
   const sp=seatPrompt();
   const ui=(i===sp.actor)? sp.ui : {kind:'wait', who: sp.actor>=0?pname(sp.actor):''};
   return {hand:p.hand, ui};
+}
+// 線上交易：雙方都選好後同時互換
+function resolveTradeOnline(){
+  const a=state.current, b=state.pending.target, picks=state.pending.tradePicks;
+  const ca=picks[a], cb=picks[b];
+  if(ca!=null) removeCard(state.players[a], ca);
+  if(cb!=null) removeCard(state.players[b], cb);
+  if(ca!=null) state.players[b].hand.push(ca);
+  if(cb!=null) state.players[a].hand.push(cb);
+  log(`${pname(a)} 與 ${pname(b)} 同時交換了手牌。`);
+  state.pending=null; endTurn();
 }
 // 線上情報交換：全部人都選好後，同時抽離、同時傳給各自左邊
 function resolveInfoSwapOnline(){
@@ -943,8 +1026,8 @@ function localPub(){
     log:state.log.slice(0,40), scores:scores.slice(0,state.players.length),
     players:state.players.map(p=>({name:p.name, n:p.hand.length})),
     inspectorTarget: state.inspector? state.inspector.target : -1,
-    gameover: state.gameover? {title:state.gameover.title, body:state.gameover.body} : null,
-    deadline: net.deadline||null, turnLimit: net.turnLimit||30
+    gameover: state.gameover? {title:state.gameover.title, body:state.gameover.body, matchWinner:(state.gameover.matchWinner==null?-1:state.gameover.matchWinner)} : null,
+    deadline: net.deadline||null, turnLimit: net.turnLimit||30, winScore: WIN_SCORE
   };
 }
 
@@ -957,11 +1040,24 @@ function broadcast(){
   state.players.forEach((p,i)=>{
     db.ref(base+'/views/'+p.pid).set(JSON.parse(JSON.stringify(viewForSeat(i))));
   });
+  botTick();   // 若輪到機器人，房主自動代打
 }
 
 // 房主收到動作：驗證來源與型別，再呼叫對應引擎函式
 function applyAction(a){
   if(!a || !net || !net.isHost || state.gameover) return;
+  // 交易：雙方同時選（不走單一操作者驗證）
+  if(a.type==='tradePick' && tradeCollecting()){
+    const a0=state.current, b0=state.pending.target;
+    const seat=state.players.findIndex(p=>p.pid===a.by);
+    if((seat===a0||seat===b0) && state.players[seat].hand.length>0 && state.pending.tradePicks[seat]===undefined){
+      state.pending.tradePicks[seat]=state.players[seat].hand[a.payload];
+      const req=[a0,b0].filter(s=>state.players[s].hand.length>0);
+      if(req.every(s=>state.pending.tradePicks[s]!==undefined)){ clearTurnTimer(); net.turnLimit=30; resolveTradeOnline(); }
+      else broadcast();
+    }
+    return;
+  }
   // 情報交換：全體同時選（多人並行，不走單一操作者驗證）
   if(a.type==='infoSwapPick' && state.pending && state.pending.type==='infoSwap'
      && (state.phase==='infoSwapPass'||state.phase==='infoSwapPick')){
@@ -991,11 +1087,11 @@ function applyAction(a){
 }
 
 // ---- 思考時間限制（房主端）：初始30秒；超時自動隨機出牌且降為10秒；有人正常行動後恢復30秒 ----
-function clearTurnTimer(){ if(net&&net.timer){ clearTimeout(net.timer); net.timer=null; } if(net) net.timerSig=null; }
+function clearTurnTimer(){ if(net&&net.timer){ clearTimeout(net.timer); net.timer=null; } if(net&&net.botTimer){ clearTimeout(net.botTimer); net.botTimer=null; } if(net) net.timerSig=null; }
 function maybeArmTimer(){
   if(!net || !net.isHost) return;
   if(state.gameover){ clearTurnTimer(); net.deadline=null; return; }
-  const collecting=(state.phase==='infoSwapPass'||state.phase==='infoSwapPick') && state.pending && state.pending.type==='infoSwap';
+  const collecting = infoCollecting() || tradeCollecting();
   const sp = collecting? {actor:0} : seatPrompt();
   if(sp.actor<0 && !collecting){ clearTurnTimer(); net.deadline=null; return; }
   const sig = collecting? 'swap' : (state.phase+':'+sp.actor);
@@ -1010,7 +1106,12 @@ function autoPlay(){
   if(!net || !net.isHost || state.gameover) return;
   net.timer=null;
   net.turnLimit=10;                        // 超時懲罰：後續變 10 秒
-  if((state.phase==='infoSwapPass'||state.phase==='infoSwapPick') && state.pending && state.pending.type==='infoSwap'){
+  if(tradeCollecting()){
+    const a=state.current,b=state.pending.target;
+    [a,b].forEach(s=>{ if(state.players[s].hand.length>0 && state.pending.tradePicks[s]===undefined){ const h=state.players[s].hand; state.pending.tradePicks[s]=h[Math.random()*h.length|0]; } });
+    log('交易思考超時，未選者自動隨機。'); resolveTradeOnline(); return;
+  }
+  if(infoCollecting()){
     state.pending.queue.forEach(seat=>{ if(state.pending.picks[seat]===undefined){ const h=state.players[seat].hand; state.pending.picks[seat]=h[Math.random()*h.length|0]; } });
     log('情報交換思考超時，未選者自動隨機。'); resolveInfoSwapOnline(); return;
   }
@@ -1087,17 +1188,30 @@ function renderGameView(pub, view){
 }
 
 function renderNetGameOver(pub){
-  const g=pub.gameover, villain=/逃脫/.test(g.title);
+  const g=pub.gameover, villain=/逃脫/.test(g.title), target=pub.winScore||10;
   const celebrate = villain
     ? `<img src="https://media.giphy.com/media/8EX8UxSNLRp5AonNfv/giphy.gif" style="max-width:280px;width:80%;border-radius:14px;margin:10px auto;display:block">`
     : `<div class="dancers"><span>🕺</span><span>💃</span><span>🕺</span><span>💃</span><span>🕺</span></div>`;
   const rows=pub.players.map((p,i)=>({name:p.name,s:pub.scores?pub.scores[i]:0})).sort((a,b)=>b.s-a.s).map(r=>`<div style="padding:3px 0">${r.name}：<b>${r.s}</b></div>`).join('');
+  let footer;
+  if(g.matchWinner>=0){            // 有人達到門檻 → 系列賽結束
+    footer=`<div class="panel win center" style="border-color:#ffd34d"><div class="big" style="font-size:1.7rem;color:#ffd34d">🏆 ${pub.players[g.matchWinner].name} 達 ${target} 分，贏得整場！</div></div>`+
+      `<div class="panel center">`+(net.isHost?`<button onclick="backToLobby()">回到大廳</button>`:`<div class="sub">系列賽結束</div>`)+`<button class="ghost" onclick="leaveRoom()">離開房間</button></div>`;
+  } else {                         // 投票再來一局
+    const rematch=(net.room&&net.room.rematch)||{}, host=net.room&&net.room.host;
+    const others=Object.keys((net.room&&net.room.players)||{}).filter(pid=>pid!==host);
+    const votes=others.filter(pid=>rematch[pid]).length, allReady=others.length>0 && votes===others.length;
+    let btns;
+    if(net.isHost){
+      btns=`<div class="sub">再來一局：${votes}/${others.length} 位玩家已準備</div>`+
+        `<button onclick="hostRematch()" ${allReady?'':'disabled'}>${allReady?'再來一局（分數續累積）':'等其他人按再來一局…'}</button>`;
+    } else {
+      btns = rematch[net.playerId] ? `<div class="sub">已準備，等待房主開始…</div>` : `<button onclick="voteRematch()">再來一局</button>`;
+    }
+    footer=`<div class="panel center">${btns}<button class="ghost" onclick="leaveRoom()">離開房間</button></div>`;
+  }
   app.innerHTML=`<div class="panel win center">${celebrate}<div class="big" style="font-size:1.6rem">🎉 ${g.title}</div><div style="line-height:1.8">${g.body}</div></div>`+
-    `<div class="panel"><div class="big">📊 總分</div>${rows}</div>`+
-    `<div class="panel center">`+
-      (net.isHost ? `<button onclick="backToLobby()">回到大廳（再玩一局）</button>` : `<div class="sub">等待房主開始下一局…</div>`)+
-      `<button class="ghost" onclick="leaveRoom()">離開房間</button>`+
-    `</div>`;
+    `<div class="panel"><div class="big">📊 總分（先達 ${target} 分獲勝）</div>${rows}</div>`+footer;
 }
 
 function netRender(){
@@ -1123,16 +1237,21 @@ function netEntry(){
 function netLobby(){
   const room=net.room||{};
   const entries=room.players?Object.entries(room.players):[];
-  const chips=entries.map(([id,p])=>`<span class="badge">${p.name}${id===room.host?' 👑':''}${id===net.playerId?'（你）':''}</span>`).join(' ');
+  const chips=entries.map(([id,p])=>`<span class="badge">${p.bot?'🤖 ':''}${p.name}${id===room.host?' 👑':''}${id===net.playerId?'（你）':''}</span>`).join(' ');
   const n=entries.length, canStart=net.isHost && n>=3;
+  const botCount=entries.filter(([,p])=>p.bot).length;
   app.innerHTML=`
     <div class="panel center">
       <div class="big">房號：<span style="color:#ffd34d;letter-spacing:3px">${net.code||''}</span></div>
-      <div class="sub">把房號給朋友，請他們選「線上連線 → 加入房間」</div>
+      <div class="sub">把房號給朋友，請他們選「線上連線 → 加入房間」（最多 8 人）</div>
     </div>
     <div class="panel">
-      <div class="big">玩家（${n}/4）</div>
+      <div class="big">玩家（${n}/8）</div>
       <div style="margin:10px 0">${chips||'（等待加入…）'}</div>
+      ${net.isHost ? `<div style="margin:8px 0">
+          <button class="ghost" onclick="addBot()" ${n>=8?'disabled':''}>＋ 加機器人</button>
+          <button class="ghost" onclick="removeBot()" ${botCount===0?'disabled':''}>－ 移除機器人</button>
+        </div>` : ''}
       ${net.isHost
         ? `<button onclick="hostStart()" ${canStart?'':'disabled'}>${canStart?'開始遊戲':'至少 3 人才能開始…'}</button>`
         : `<div class="sub">等待房主開始遊戲…</div>`}
