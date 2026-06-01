@@ -1,0 +1,792 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>犯人在跳舞 — 4人單機版</title>
+<style>
+  /* ---------- 基本樣式 ---------- */
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: "Microsoft JhengHei", system-ui, sans-serif;
+    background: #1b1530; color: #f2eefb; min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center;
+  }
+  h1 { font-size: 1.5rem; margin: 16px 0 4px; }
+  .sub { color: #b3a8d6; font-size: .85rem; margin-bottom: 12px; }
+  #app { width: 100%; max-width: 760px; padding: 0 16px 40px; }
+
+  .panel {
+    background: #2a2150; border: 1px solid #4a3d80; border-radius: 14px;
+    padding: 20px; margin-top: 14px;
+  }
+  button {
+    font-family: inherit; cursor: pointer; border: none; border-radius: 10px;
+    padding: 12px 18px; font-size: 1rem; background: #6c4cd6; color: #fff;
+    transition: transform .05s, background .15s; margin: 4px;
+  }
+  button:hover:not(:disabled) { background: #7e60e8; }
+  button:active:not(:disabled) { transform: scale(.97); }
+  button:disabled { background: #3a3260; color: #8a80b0; cursor: not-allowed; }
+  button.ghost { background: #3a3260; }
+  button.ghost:hover:not(:disabled) { background: #4a3d80; }
+
+  input {
+    font-family: inherit; padding: 10px 12px; border-radius: 8px;
+    border: 1px solid #4a3d80; background: #1b1530; color: #fff;
+    font-size: 1rem; width: 100%; margin: 6px 0;
+  }
+
+  /* ---------- 卡片 ---------- */
+  .hand { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+  .card {
+    width: 110px; min-height: 140px; border-radius: 12px; padding: 10px;
+    background: linear-gradient(160deg,#fff,#e9e2ff); color: #2a2150;
+    display: flex; flex-direction: column; cursor: pointer;
+    border: 3px solid transparent; transition: transform .08s, border .15s;
+    text-align: left;
+  }
+  .card:hover.playable { transform: translateY(-6px); border-color: #ffd34d; }
+  .card.playable { border-color: #6c4cd6; }
+  .card.disabled { opacity: .5; cursor: not-allowed; filter: grayscale(.5); }
+  .card .cname { font-weight: 700; font-size: 1.05rem; }
+  .card .cdesc { font-size: .72rem; margin-top: 6px; flex: 1; line-height: 1.3; }
+  .card .cwhy { font-size: .68rem; color: #b02a4a; margin-top: 4px; }
+  .card.crime { background: linear-gradient(160deg,#ffd9d9,#ff9e9e); }
+
+  .badge { display:inline-block; background:#6c4cd6; border-radius:20px;
+           padding:4px 12px; font-size:.85rem; margin:2px; }
+  .log { background:#171127; border-radius:10px; padding:12px; margin-top:14px;
+         max-height:180px; overflow-y:auto; font-size:.85rem; line-height:1.6; }
+  .log div { padding:2px 0; border-bottom:1px solid #2a2150; }
+  .big { font-size:1.3rem; font-weight:700; margin:10px 0; }
+  .center { text-align:center; }
+  .win { background: linear-gradient(160deg,#2a2150,#4a2d6e); }
+</style>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+</head>
+<body>
+  <h1>🕺 犯人在跳舞</h1>
+  <div class="sub">本機同桌 ＆ 線上連線</div>
+  <div id="app"></div>
+  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v11 · 情報交換改每人自選傳左</div>
+  <div id="toast" style="position:fixed;left:50%;bottom:30px;transform:translateX(-50%);
+       background:#b02a4a;color:#fff;padding:12px 20px;border-radius:10px;font-size:1rem;
+       opacity:0;transition:opacity .2s;pointer-events:none;z-index:99;max-width:90%;"></div>
+
+<script>
+// 提示：點到不能打的牌時告訴玩家原因
+let toastTimer=null;
+window.nope = (msg)=>{
+  const t=document.getElementById("toast");
+  t.textContent="⚠ "+msg;
+  t.style.opacity="1";
+  clearTimeout(toastTimer);
+  toastTimer=setTimeout(()=>{ t.style.opacity="0"; }, 1800);
+};
+</script>
+<script>
+/* =========================================================
+   犯人在跳舞 — 4人單機原型
+   規則：標準版 4 人，使用 16 張牌，每人發 4 張。
+   注意：標示「※簡化」處與正式桌遊略有出入，之後可再調整。
+========================================================= */
+
+// ---------- 卡片資料 ----------
+const CARDS = {
+  firstFinder: { name:"第一發現者", desc:"開場牌：打出後遊戲正式開始，無其他效果。" },
+  criminal:    { name:"犯人",       desc:"你就是犯人！只有當這是你最後一張手牌時才能打出，打出即逃脫成功獲勝。", crime:true },
+  detective:   { name:"偵探",       desc:"手牌≤3張可打出。指定一人猜「你就是犯人」，猜中即獲勝（對方有不在場證明可免疫）。" },
+  alibi:       { name:"不在場證明", desc:"與犯人牌一起持有時，被偵探指認可免疫一次。單獨打出無效果。" },
+  accomplice:  { name:"共犯",       desc:"打出後加入犯人陣營：犯人贏你就贏。" },
+  witness:     { name:"目擊者",     desc:"指定一人，偷看他的全部手牌。" },
+  infoManip:   { name:"情報交換",   desc:"全體同時把一張手牌傳給左邊的人，每人自己選要傳哪張。" },
+  rumor:       { name:"謠言",       desc:"全體同時從右邊的人手牌盲抽一張。" },
+  trade:       { name:"交易",       desc:"指定一人，你給他一張（你選），盲抽回他一張。" },
+  boy:         { name:"少年",       desc:"得知誰是犯人（誰持有犯人牌）。" },
+  dog:         { name:"神犬",       desc:"指定一人，由他自己選一張棄掉；若棄到犯人牌你獲勝，否則神犬牌交給他。" },
+  citizen:     { name:"一般人",     desc:"無效果（煙霧彈）。" },
+};
+
+// 4人用 16 張牌組（含5張必備牌 + 11張）
+const DECK = [
+  "firstFinder",
+  "criminal",
+  "detective","detective",
+  "alibi","alibi",
+  "accomplice",
+  "witness",
+  "infoManip",
+  "rumor","rumor",
+  "trade","trade",
+  "boy",
+  "dog",
+  "citizen",
+];
+
+let state = null;
+let scores = [0,0,0,0];     // 跨局累積總分
+let playerNames = null;     // 記住玩家名字，下一局沿用
+let WIN_SCORE = 10;         // 賽末門檻：累積總分先達此分且為唯一最高者，贏得整場
+let mode = null;            // null=主選單 / 'local'=本機同桌 / 'online'=線上連線
+const app = document.getElementById("app");
+
+// 依結局計算本局各人得分（回傳長度4陣列）
+function pointsFor(type, winnerIdx, criminalIdx){
+  const pts=[0,0,0,0];
+  for(let i=0;i<4;i++){
+    const isVillain = (i===criminalIdx) || state.players[i].accomplice;
+    if(type==='escape'){ pts[i]= isVillain?2:0; }       // 犯人逃脫：犯人+共犯各+2
+    else if(i===winnerIdx){ pts[i]= (type==='dog'?3:2); } // 神犬+3 / 偵探+2
+    else if(isVillain){ pts[i]=0; }
+    else { pts[i]=1; }                                    // 其他平民+1
+  }
+  return pts;
+}
+
+// ---------- 工具 ----------
+function shuffle(a){ a=[...a]; for(let i=a.length-1;i>0;i--){const j=Math.random()*(i+1)|0;[a[i],a[j]]=[a[j],a[i]];} return a; }
+function log(msg){ state.log.unshift(msg); }
+function pname(i){ return state.players[i].name; }
+function nextActive(from){
+  for(let k=1;k<=4;k++){ const i=(from+k)%4; if(state.players[i].hand.length>0) return i; }
+  return -1; // 沒人有牌
+}
+function holderOfCriminal(){ return state.players.findIndex(p=>p.hand.includes("criminal")); }
+
+// ---------- 開新局 ----------
+function newGame(names){
+  const deck = shuffle(DECK);
+  const players = names.map((n,i)=>({
+    name:n, hand:deck.slice(i*4,i*4+4), accomplice:false
+  }));
+  const starter = players.findIndex(p=>p.hand.includes("firstFinder"));
+  state = {
+    players, current:starter, firstMoveDone:false,
+    phase:"pass", log:[], pending:null, gameover:null,
+  };
+  log(`遊戲開始！由持有「第一發現者」的 ${players[starter].name} 先手。`);
+  render();
+}
+
+// ---------- 出牌可否 ----------
+function playable(card){
+  const p = state.players[state.current];
+  // 第一回合：先手必須先打第一發現者
+  if(!state.firstMoveDone){
+    if(card==="firstFinder") return {ok:true};
+    return {ok:false, why:"開場必須先打第一發現者"};
+  }
+  if(card==="criminal" && p.hand.length!==1) return {ok:false, why:"只能在最後一張時打出"};
+  if(card==="detective" && p.hand.length>3) return {ok:false, why:"手牌需≤3張"};
+  return {ok:true};
+}
+
+// ---------- 渲染 ----------
+function render(){
+  if(mode==='online'){ netRender(); return; }
+  if(state===null){ mode==='local' ? renderSetup() : renderLanding(); return; }
+  if(state.gameover){ renderGameOver(); return; }
+  switch(state.phase){
+    case "pass":   renderPass(); break;
+    case "turn":   renderTurn(); break;
+    case "target": renderTarget(); break;
+    case "tradeGive": renderTradeGive(); break;
+    case "tradePass": renderTradePass(); break;
+    case "tradeReceive": renderTradeReceive(); break;
+    case "dogPass": renderDogPass(); break;
+    case "dogDiscard": renderDogDiscard(); break;
+    case "infoSwapPass": renderInfoSwapPass(); break;
+    case "infoSwapPick": renderInfoSwapPick(); break;
+    case "reveal": renderReveal(); break;
+  }
+}
+
+function renderSetup(){
+  const defs = playerNames || ["Erica04","一直委曲求全","微末狂龍","挖玨機"];
+  app.innerHTML = `
+    <div class="panel">
+      <div class="big">輸入 4 位玩家名字</div>
+      ${defs.map((n,i)=>`<input id="n${i}" placeholder="玩家 ${i+1}" value="${n}">`).join("")}
+      <button onclick="startGame()">開始遊戲</button>
+      <button class="ghost" onclick="mode=null;render()">← 回主選單</button>
+    </div>
+    <div class="panel">
+      <div class="big">怎麼玩</div>
+      <div style="font-size:.9rem;line-height:1.7">
+        這是「同桌輪流」版：大家共用這一台裝置。<br>
+        輪到誰，就把畫面交給誰；換人前會有「請交給下一位」的遮擋畫面，避免偷看手牌。<br>
+        目標：偵探/狗找出犯人，犯人想辦法把犯人牌留到最後一張打出逃脫。
+      </div>
+    </div>`;
+}
+window.startGame = ()=>{
+  const names=[0,1,2,3].map(i=>document.getElementById("n"+i).value.trim()||("玩家"+(i+1)));
+  playerNames = names;
+  scores = [0,0,0,0];     // 新一輪比賽，分數歸零
+  newGame(names);
+};
+window.nextRound = ()=>{ newGame(playerNames); };               // 保留總分，重新發牌
+window.resetAll = ()=>{ scores=[0,0,0,0]; state=null; render(); }; // 回到設定畫面
+
+function renderPass(){
+  app.innerHTML = `
+    <div class="panel center">
+      <div class="big">請把裝置交給</div>
+      <div class="big" style="font-size:2rem;color:#ffd34d">${pname(state.current)}</div>
+      <div class="sub">其他人請勿偷看 👀</div>
+      <button onclick="state.phase='turn';render()">我是 ${pname(state.current)}，開始回合</button>
+      ${scoreStrip()}
+    </div>
+    ${logHtml()}`;
+}
+
+function renderTurn(){
+  const p = state.players[state.current];
+  const cards = p.hand.map((c,idx)=>{
+    const info=CARDS[c]; const pl=playable(c);
+    return `<div class="card ${info.crime?'crime':''} ${pl.ok?'playable':'disabled'}"
+                 onclick="${pl.ok?`playCard(${idx})`:`nope('${pl.why}')`}">
+              <div class="cname">${info.name}</div>
+              <div class="cdesc">${info.desc}</div>
+              ${pl.ok?'':`<div class="cwhy">✗ ${pl.why}</div>`}
+            </div>`;
+  }).join("");
+  app.innerHTML = `
+    <div class="panel">
+      <div class="big">${p.name} 的回合</div>
+      <div class="sub">手牌 ${p.hand.length} 張 · 點一張可打出的牌</div>
+      <div class="hand">${cards}</div>
+    </div>
+    ${logHtml()}`;
+}
+
+function renderTarget(){
+  const opts = state.players.map((p,i)=> i===state.current ? "" :
+      `<button onclick="chooseTarget(${i})">${p.name}（${p.hand.length}張）</button>`).join("");
+  app.innerHTML = `
+    <div class="panel">
+      <div class="big">${CARDS[state.pending.card].name}：選擇目標</div>
+      <div>${opts}</div>
+      <button class="ghost" onclick="cancelPlay()">取消</button>
+    </div>
+    ${logHtml()}`;
+}
+
+function renderTradeGive(){
+  const p=state.players[state.current];
+  const cards=p.hand.map((c,idx)=>`
+     <div class="card ${CARDS[c].crime?'crime':''} playable" onclick="doTradeGive(${idx})">
+       <div class="cname">${CARDS[c].name}</div>
+       <div class="cdesc">${CARDS[c].desc}</div>
+     </div>`).join("");
+  app.innerHTML=`
+    <div class="panel">
+      <div class="big">交易：選一張給 ${pname(state.pending.target)}</div>
+      <div class="hand">${cards}</div>
+    </div>${logHtml()}`;
+}
+
+function renderTradePass(){
+  const t=state.pending.target;
+  app.innerHTML=`
+    <div class="panel center">
+      <div class="big">🔁 交易！請把裝置交給</div>
+      <div class="big" style="font-size:2rem;color:#ffd34d">${pname(t)}</div>
+      <div class="sub">${pname(state.current)} 想跟你交換一張牌，請也選一張交換出去</div>
+      <button onclick="state.phase='tradeReceive';render()">我是 ${pname(t)}，選擇交換</button>
+    </div>
+    ${logHtml()}`;
+}
+
+function renderTradeReceive(){
+  const t=state.pending.target, tp=state.players[t];
+  const cards=tp.hand.map((c,idx)=>`
+     <div class="card ${CARDS[c].crime?'crime':''} playable" onclick="tradeReceiveCard(${idx})">
+       <div class="cname">${CARDS[c].name}</div>
+       <div class="cdesc">${CARDS[c].desc}</div>
+     </div>`).join("");
+  app.innerHTML=`
+    <div class="panel">
+      <div class="big">${pname(t)}：選一張交換給 ${pname(state.current)}</div>
+      <div class="sub">你拿不到對方選的是哪張，互相盲換</div>
+      <div class="hand">${cards}</div>
+    </div>${logHtml()}`;
+}
+
+function renderDogPass(){
+  const t=state.pending.target;
+  app.innerHTML = `
+    <div class="panel center">
+      <div class="big">🐕 神犬出動！請把裝置交給</div>
+      <div class="big" style="font-size:2rem;color:#ffd34d">${pname(t)}</div>
+      <div class="sub">${pname(state.pending.dogPlayer)} 派神犬來調查你，你必須棄掉一張手牌</div>
+      <button onclick="state.phase='dogDiscard';render()">我是 ${pname(t)}，選擇棄牌</button>
+    </div>
+    ${logHtml()}`;
+}
+
+function renderDogDiscard(){
+  const t=state.pending.target, tp=state.players[t];
+  const cards=tp.hand.map((c,idx)=>`
+     <div class="card ${CARDS[c].crime?'crime':''} playable" onclick="dogDiscard(${idx})">
+       <div class="cname">${CARDS[c].name}</div>
+       <div class="cdesc">${CARDS[c].desc}</div>
+     </div>`).join("");
+  app.innerHTML=`
+    <div class="panel">
+      <div class="big">${pname(t)}：選一張棄掉</div>
+      <div class="sub">⚠ 若棄出犯人牌，派神犬的 ${pname(state.pending.dogPlayer)} 將獲勝！</div>
+      <div class="hand">${cards}</div>
+    </div>${logHtml()}`;
+}
+
+function renderInfoSwapPass(){
+  const p=state.pending, cur=p.queue[p.qi];
+  app.innerHTML=`
+    <div class="panel center">
+      <div class="big">🔄 情報交換！請把裝置交給</div>
+      <div class="big" style="font-size:2rem;color:#ffd34d">${pname(cur)}</div>
+      <div class="sub">每人各選一張牌傳給左邊（${p.qi+1}/${p.queue.length}）</div>
+      <button onclick="state.phase='infoSwapPick';render()">我是 ${pname(cur)}，選擇要傳的牌</button>
+    </div>${logHtml()}`;
+}
+
+function renderInfoSwapPick(){
+  const p=state.pending, cur=p.queue[p.qi], hand=state.players[cur].hand;
+  const cards=hand.map((c,idx)=>`
+     <div class="card ${CARDS[c].crime?'crime':''} playable" onclick="infoSwapPick(${idx})">
+       <div class="cname">${CARDS[c].name}</div>
+       <div class="cdesc">${CARDS[c].desc}</div>
+     </div>`).join("");
+  app.innerHTML=`
+    <div class="panel">
+      <div class="big">${pname(cur)}：選一張傳給左邊（傳給 ${pname((cur+3)%4)}）</div>
+      <div class="hand">${cards}</div>
+    </div>${logHtml()}`;
+}
+
+function renderReveal(){
+  app.innerHTML=`
+    <div class="panel">
+      <div class="big">${state.pending.title}</div>
+      <div style="font-size:1.05rem;line-height:1.8">${state.pending.body}</div>
+      <button onclick="afterReveal()">繼續 ▶</button>
+    </div>${logHtml()}`;
+}
+
+function renderGameOver(){
+  const g=state.gameover;
+  const matchBanner = g.matchWinner!=null
+    ? `<div class="panel win center" style="border-color:#ffd34d">
+         <div class="big" style="font-size:2rem;color:#ffd34d">🏆 ${pname(g.matchWinner)} 贏得整場！</div>
+         <div class="sub">率先達到 ${WIN_SCORE} 分</div>
+       </div>`
+    : "";
+  const buttons = g.matchWinner!=null
+    ? `<button onclick="resetAll()">開新的一場（重設分數）</button>`
+    : `<button onclick="nextRound()">下一局（保留總分）▶</button>
+       <button class="ghost" onclick="resetAll()">重設分數 / 改玩家</button>`;
+  app.innerHTML=`
+    <div class="panel win center">
+      <div class="big" style="font-size:1.8rem">🎉 ${g.title}</div>
+      <div style="font-size:1.1rem;line-height:1.9">${g.body}</div>
+    </div>
+    ${matchBanner}
+    ${scoreHtml(g.points)}
+    <div class="panel center">${buttons}</div>
+    ${logHtml()}`;
+}
+
+function logHtml(){
+  return `<div class="log">${state.log.map(l=>`<div>${l}</div>`).join("")}</div>`;
+}
+
+// ---------- 出牌主流程 ----------
+window.playCard = (idx)=>{
+  const p=state.players[state.current];
+  const card=p.hand[idx];
+  if(!playable(card).ok) return;
+
+  // 需要選目標的牌：先進入選目標階段（牌還沒移除）
+  if(["detective","witness","trade","dog"].includes(card)){
+    state.pending={card, cardIdx:idx};
+    state.phase="target"; render(); return;
+  }
+  // 其餘直接結算
+  resolveSimple(card, idx);
+};
+
+window.cancelPlay = ()=>{ state.pending=null; state.phase="turn"; render(); };
+
+window.chooseTarget = (t)=>{
+  const card=state.pending.card;
+  if(card==="trade"){
+    // 先把交易牌本身打出移除，之後「選一張給對方」就不會列到它、也不會索引錯位
+    const me=state.players[state.current];
+    me.hand.splice(state.pending.cardIdx,1);
+    state.firstMoveDone=true;
+    state.pending.target=t; state.phase="tradeGive"; render(); return;
+  }
+  resolveTargeted(card, state.pending.cardIdx, t);
+};
+
+window.doTradeGive = (giveIdx)=>{
+  const me=state.players[state.current], t=state.pending.target, tp=state.players[t];
+  state.pending.giveCard = me.hand.splice(giveIdx,1)[0];  // 我選定的牌（先抽離手牌）
+  if(tp.hand.length===0){
+    // 對方沒牌可換：直接把我的牌給他
+    tp.hand.push(state.pending.giveCard);
+    log(`${me.name} 把一張牌交給了 ${tp.name}（對方無牌可換）。`);
+    state.pending=null; endTurn(); return;
+  }
+  state.phase="tradePass"; render();    // 把裝置交給對方，由他也選一張
+};
+
+// 對方選一張交換
+window.tradeReceiveCard = (idx)=>{
+  const me=state.players[state.current], t=state.pending.target, tp=state.players[t];
+  const theirCard=tp.hand.splice(idx,1)[0];
+  me.hand.push(theirCard);                  // 對方選的牌 → 給我
+  tp.hand.push(state.pending.giveCard);     // 我選的牌 → 給對方
+  log(`${me.name} 與 ${tp.name} 各選一張牌交換了。`);
+  state.pending=null;
+  endTurn();
+};
+
+// 移除手牌中第一張指定類型
+function removeCard(p, card){ const i=p.hand.indexOf(card); if(i>=0) p.hand.splice(i,1); }
+
+// 不需目標的牌
+function resolveSimple(card, idx){
+  const me=state.players[state.current];
+  me.hand.splice(idx,1); // 移除打出的牌
+  state.firstMoveDone = true;
+
+  switch(card){
+    case "firstFinder":
+      log(`${me.name} 打出「第一發現者」：有人犯案了！遊戲開始。`); endTurn(); break;
+    case "citizen":
+      log(`${me.name} 打出「一般人」（無事發生）。`); endTurn(); break;
+    case "alibi":
+      log(`${me.name} 打出「不在場證明」（單獨打出無效果）。`); endTurn(); break;
+    case "accomplice":
+      me.accomplice=true;
+      log(`${me.name} 打出「共犯」，加入了犯人陣營。`); endTurn(); break;
+    case "boy":{
+      const cr=holderOfCriminal();
+      log(`${me.name} 打出「少年」，偷偷確認了犯人身分。`);
+      showReveal("少年：你看見了…", cr<0?"目前沒有人持有犯人牌。":`<b style="color:#ffd34d">${pname(cr)}</b> 持有犯人牌！`);
+      break;
+    }
+    case "infoManip":{
+      // 全體各自選一張傳給左邊：依序把畫面交給每位有手牌的玩家來選
+      startInfoSwap();
+      break;
+    }
+    case "rumor":{
+      doRumor();
+      log(`「謠言」：全體從右邊盲抽了一張牌。`);
+      endTurn(); break;
+    }
+    case "criminal":{
+      // 只有最後一張能打 → 逃脫成功
+      const accs=state.players.filter(p=>p.accomplice).map(p=>p.name);
+      gameOver("犯人逃脫成功！",
+        `<b>${me.name}</b> 成功把犯人牌留到最後打出，逃之夭夭！<br>`+
+        (accs.length?`共犯 ${accs.join("、")} 一同獲勝。<br>`:"")+
+        `🏆 犯人${accs.length?"與共犯":""}獲勝（+2），其他人 0 分。`,
+        pointsFor('escape', state.current, state.current));
+      break;
+    }
+  }
+}
+
+// 情報交換：依序讓每位有手牌的玩家自選一張，全部選完後同時傳給左邊
+function startInfoSwap(){
+  const queue=[0,1,2,3].filter(i=>state.players[i].hand.length>0);
+  if(queue.length===0){ log(`「情報交換」：沒有人有手牌可傳。`); endTurn(); return; }
+  state.pending={ type:'infoSwap', queue, qi:0, picks:{} };
+  state.phase='infoSwapPass'; render();
+}
+window.infoSwapPick=(idx)=>{
+  const p=state.pending; const cur=p.queue[p.qi];
+  p.picks[cur]=state.players[cur].hand[idx];   // 記下選的牌
+  p.qi++;
+  if(p.qi<p.queue.length){ state.phase='infoSwapPass'; render(); return; }
+  // 全部選完 → 先全部抽離，再同時發給各自左邊（i 的左邊 = (i+3)%4）
+  Object.entries(p.picks).forEach(([i,card])=>{ removeCard(state.players[i], card); });
+  Object.entries(p.picks).forEach(([i,card])=>{ state.players[((+i)+3)%4].hand.push(card); });
+  log(`「情報交換」：全體各自選一張傳給了左邊。`);
+  state.pending=null; endTurn();
+};
+function doRumor(){
+  // 每人從右邊(i+1)盲抽一張，用 snapshot 同時進行
+  const snap=state.players.map(p=>[...p.hand]);
+  const taken=state.players.map(()=>null);
+  state.players.forEach((p,i)=>{
+    const right=(i+1)%4; const rh=snap[right];
+    if(rh.length){ taken[i]=rh[Math.random()*rh.length|0]; }
+  });
+  // 移除被抽走的（注意可能重複類型，逐一移除一張）
+  taken.forEach((c,i)=>{ if(c!==null) removeCard(state.players[(i+1)%4], c); });
+  taken.forEach((c,i)=>{ if(c!==null) state.players[i].hand.push(c); });
+}
+
+// 需要目標的牌
+function resolveTargeted(card, idx, t){
+  const me=state.players[state.current];
+  const tp=state.players[t];
+  me.hand.splice(idx,1); // 移除打出的牌
+  state.firstMoveDone=true;
+  state.pending=null;
+
+  switch(card){
+    case "detective":{
+      const targetIsCriminal = tp.hand.includes("criminal");
+      if(targetIsCriminal && tp.hand.includes("alibi")){
+        removeCard(tp,"alibi");
+        log(`${me.name} 用偵探指認 ${tp.name}…但對方亮出不在場證明！指認失敗。`);
+        endTurn();
+      } else if(targetIsCriminal){
+        log(`${me.name} 用偵探指認 ${tp.name} → 正是犯人！`);
+        const accs=state.players.filter(p=>p.accomplice).map(p=>p.name);
+        gameOver("偵探破案！",
+          `<b>${me.name}</b> 成功指認 <b>${tp.name}</b> 為犯人！<br>`+
+          `🏆 偵探 +2，其他平民 +1，犯人${accs.length?"與共犯":""} 0 分。`,
+          pointsFor('detective', state.current, t));
+      } else {
+        log(`${me.name} 用偵探指認 ${tp.name} → 猜錯了！${tp.name} 不是犯人。`);
+        endTurn();
+      }
+      break;
+    }
+    case "witness":{
+      log(`${me.name} 打出「目擊者」，偷看了 ${tp.name} 的手牌。`);
+      const list = tp.hand.length
+        ? tp.hand.map(c=>`<b style="color:#ffd34d">${CARDS[c].name}</b><br>`+
+            `<span style="font-size:.8rem;color:#b3a8d6">${CARDS[c].desc}</span>`
+          ).join(`<hr style="border-color:#4a3d80;margin:8px 0">`)
+        : "（空手）";
+      showReveal(`目擊者：${tp.name} 的手牌（${tp.hand.length}張）`, list);
+      break;
+    }
+    case "dog":{
+      if(tp.hand.length===0){ log(`${tp.name} 沒有手牌，神犬無效。`); endTurn(); break; }
+      // 把畫面交給被指定的人，由他自己選一張棄牌
+      log(`${me.name} 派出神犬調查 ${tp.name}。`);
+      state.pending={dogPlayer:state.current, target:t};
+      state.phase="dogPass"; render();
+      break;
+    }
+  }
+}
+
+// reveal 後續：顯示給當前玩家看的私密資訊，看完才換人
+function showReveal(title, body){
+  state.pending={title, body};
+  state.phase="reveal"; render();
+}
+window.afterReveal = ()=>{ state.pending=null; endTurn(); };
+
+// 神犬：被指定者選一張棄掉
+window.dogDiscard = (idx)=>{
+  const dogP=state.pending.dogPlayer, t=state.pending.target;
+  const me=state.players[dogP], tp=state.players[t];
+  const discarded=tp.hand.splice(idx,1)[0];
+  if(discarded==="criminal"){
+    log(`${tp.name} 被神犬逼得棄出了犯人牌！`);
+    const accs=state.players.filter(p=>p.accomplice).map(p=>p.name);
+    gameOver("神犬立大功！",
+      `<b>${me.name}</b> 的神犬讓 ${tp.name} 棄出犯人牌！<br>`+
+      `🏆 神犬 +3，其他平民 +1，犯人${accs.length?"與共犯":""} 0 分。`,
+      pointsFor('dog', dogP, t));
+  } else {
+    tp.hand.push("dog"); // 神犬牌交給被調查者
+    log(`${tp.name} 棄掉「${CARDS[discarded].name}」(非犯人)，神犬牌交給 ${tp.name}。`);
+    state.pending=null;
+    endTurn();
+  }
+};
+
+// ---------- 回合結束 ----------
+function endTurn(){
+  // 檢查是否還有人有牌
+  const total=state.players.reduce((s,p)=>s+p.hand.length,0);
+  if(total===0){
+    gameOver("和局", "所有手牌都打完了，沒有人達成勝利條件。"); return;
+  }
+  const nxt=nextActive(state.current);
+  if(nxt<0){ gameOver("和局","沒有人還有手牌。"); return; }
+  state.current=nxt;
+  state.phase="pass";
+  render();
+}
+
+function gameOver(title, body, points){
+  points = points || [0,0,0,0];
+  points.forEach((pt,i)=>{ scores[i]+=pt; });   // 計入累積總分
+  // 賽末判定：累積最高分達門檻、且為「唯一」最高者 → 贏得整場；同分並列則續賽
+  const max=Math.max(...scores);
+  const leaders=[0,1,2,3].filter(i=>scores[i]===max);
+  const matchWinner = (max>=WIN_SCORE && leaders.length===1) ? leaders[0] : null;
+  state.gameover={title, body, points, matchWinner};
+  // 顯示所有人手牌真相
+  const truth=state.players.map(p=>`${p.name}: ${p.hand.map(c=>CARDS[c].name).join("、")||"空手"}`).join("<br>");
+  state.gameover.body += `<hr style="border-color:#4a3d80"><div style="font-size:.85rem;color:#b3a8d6">結算時手牌：<br>${truth}</div>`;
+  render();
+}
+
+// 累積分數表（roundPoints 有給就在後面標本局 +N）
+function scoreHtml(roundPoints){
+  const order=[...state.players.keys()].sort((a,b)=>scores[b]-scores[a]);
+  const rows=order.map(i=>{
+    const rp = roundPoints? ` <span style="color:#7CFC9B">(本局+${roundPoints[i]})</span>`:'';
+    return `<tr><td style="padding:5px 12px">${state.players[i].name}</td>
+      <td style="padding:5px 12px;text-align:right;font-weight:700;font-size:1.1rem">${scores[i]}${rp}</td></tr>`;
+  }).join("");
+  return `<div class="panel"><div class="big">📊 累積總分</div>
+    <table style="width:100%;border-collapse:collapse">${rows}</table></div>`;
+}
+// 換人畫面用的精簡分數條
+function scoreStrip(){
+  return `<div class="sub" style="margin-top:10px">總分　`+
+    state.players.map((p,i)=>`${p.name} <b>${scores[i]}</b>`).join("　·　")+`</div>`;
+}
+
+// ===================================================================
+//  線上連線（Firebase Realtime Database）— 階段1：主選單 + 大廳
+// ===================================================================
+const firebaseConfig = {
+  apiKey: "AIzaSyDpVP4L3rRbuAJrlRldCRcP6FM4W_7aldE",
+  authDomain: "criminal-dance.firebaseapp.com",
+  databaseURL: "https://criminal-dance-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "criminal-dance",
+  storageBucket: "criminal-dance.firebasestorage.app",
+  messagingSenderId: "350274782193",
+  appId: "1:350274782193:web:79b949cada039893ecfa50",
+  measurementId: "G-GLPT9X5NN0"
+};
+let fbApp=null, db=null;
+function fbInit(){ if(db) return db; fbApp=firebase.initializeApp(firebaseConfig); db=firebase.database(); return db; }
+
+let net = null;  // { phase, code, playerId, myName, isHost, room, ref }
+
+// ---- 主選單 ----
+function renderLanding(){
+  app.innerHTML = `
+    <div class="panel center">
+      <div class="big">選擇遊玩方式</div>
+      <button onclick="mode='local';playerNames=null;render()">🪑 本機同桌（一台裝置輪流）</button>
+      <button onclick="enterOnline()">🌐 線上連線（各自裝置）</button>
+    </div>
+    <div class="panel">
+      <div class="big">說明</div>
+      <div style="font-size:.9rem;line-height:1.7">
+        本機同桌：大家共用這台裝置輪流玩。<br>
+        線上連線：每人用自己的手機／電腦開同一個網址，用房號加入同一局。
+      </div>
+    </div>`;
+}
+
+window.enterOnline=()=>{
+  mode='online';
+  net={ phase:'entry', code:null, playerId:'p'+Math.random().toString(36).slice(2,9),
+        myName:'', isHost:false, room:null };
+  render();
+};
+
+function genCode(){ const a='ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let s=''; for(let i=0;i<4;i++)s+=a[Math.random()*a.length|0]; return s; }
+
+window.createRoom=async ()=>{
+  const name=(document.getElementById('myname').value||'').trim();
+  if(!name){ nope('請先輸入你的名字'); return; }
+  net.myName=name; net.isHost=true; fbInit();
+  const code=genCode(); net.code=code;
+  await db.ref('rooms/'+code).set({
+    host: net.playerId, status:'lobby',
+    createdAt: firebase.database.ServerValue.TIMESTAMP,
+    players:{ [net.playerId]:{ name, joinedAt: firebase.database.ServerValue.TIMESTAMP } }
+  });
+  attachRoom(code);
+};
+
+window.joinRoom=async ()=>{
+  const name=(document.getElementById('myname').value||'').trim();
+  const code=(document.getElementById('roomcode').value||'').trim().toUpperCase();
+  if(!name){ nope('請先輸入你的名字'); return; }
+  if(code.length!==4){ nope('房號是 4 個字'); return; }
+  net.myName=name; net.code=code; fbInit();
+  const roomRef=db.ref('rooms/'+code);
+  const room=(await roomRef.once('value')).val();
+  if(!room){ nope('找不到這個房間'); return; }
+  if(room.status!=='lobby'){ nope('遊戲已開始，無法加入'); return; }
+  if(room.players && Object.keys(room.players).length>=4){ nope('房間已滿（4人）'); return; }
+  await roomRef.child('players/'+net.playerId).set({ name, joinedAt: firebase.database.ServerValue.TIMESTAMP });
+  attachRoom(code);
+};
+
+function attachRoom(code){
+  const roomRef=db.ref('rooms/'+code);
+  roomRef.child('players/'+net.playerId).onDisconnect().remove();  // 斷線自動退出
+  net.ref=roomRef; net.phase='lobby';
+  roomRef.on('value',(snap)=>{
+    net.room=snap.val();
+    if(!net.room){ nope('房間已關閉'); leaveRoom(); return; }
+    net.isHost = net.room.host===net.playerId;
+    render();
+  });
+}
+
+window.leaveRoom=()=>{
+  if(net&&net.ref){ net.ref.off(); net.ref.child('players/'+net.playerId).remove(); }
+  net=null; mode=null; render();
+};
+
+window.hostStart=()=>{ nope('連線對戰本體開發中（大廳已完成）'); };
+
+function netRender(){
+  if(!net){ renderLanding(); return; }
+  if(net.phase==='entry') return netEntry();
+  return netLobby();
+}
+
+function netEntry(){
+  app.innerHTML=`
+    <div class="panel">
+      <div class="big">🌐 線上連線</div>
+      <input id="myname" placeholder="你的名字" value="${net.myName||''}">
+      <button onclick="createRoom()">建立新房間（你當房主）</button>
+      <hr style="border-color:#4a3d80;margin:14px 0">
+      <input id="roomcode" placeholder="輸入房號（4 個字）" maxlength="4" style="text-transform:uppercase">
+      <button onclick="joinRoom()">加入房間</button>
+      <button class="ghost" onclick="net=null;mode=null;render()">← 回主選單</button>
+    </div>`;
+}
+
+function netLobby(){
+  const room=net.room||{};
+  const entries=room.players?Object.entries(room.players):[];
+  const chips=entries.map(([id,p])=>`<span class="badge">${p.name}${id===room.host?' 👑':''}${id===net.playerId?'（你）':''}</span>`).join(' ');
+  const n=entries.length, canStart=net.isHost && n===4;
+  app.innerHTML=`
+    <div class="panel center">
+      <div class="big">房號：<span style="color:#ffd34d;letter-spacing:3px">${net.code||''}</span></div>
+      <div class="sub">把房號給朋友，請他們選「線上連線 → 加入房間」</div>
+    </div>
+    <div class="panel">
+      <div class="big">玩家（${n}/4）</div>
+      <div style="margin:10px 0">${chips||'（等待加入…）'}</div>
+      ${net.isHost
+        ? `<button onclick="hostStart()" ${canStart?'':'disabled'}>${canStart?'開始遊戲':'等待 4 人到齊…'}</button>`
+        : `<div class="sub">等待房主開始遊戲…</div>`}
+      <button class="ghost" onclick="leaveRoom()">離開房間</button>
+    </div>`;
+}
+
+// 啟動
+render();
+</script>
+</body>
+</html>

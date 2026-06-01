@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<title>Firebase 連線測試</title>
+<style>
+  body{font-family:system-ui;background:#1b1530;color:#f2eefb;padding:30px;line-height:1.8}
+  .ok{color:#7CFC9B}.err{color:#ff8a8a}
+  pre{background:#171127;padding:12px;border-radius:8px;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<h2>🔌 Firebase 連線測試</h2>
+<div id="out">初始化中…</div>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script>
+const firebaseConfig = {
+  apiKey: "AIzaSyDpVP4L3rRbuAJrlRldCRcP6FM4W_7aldE",
+  authDomain: "criminal-dance.firebaseapp.com",
+  databaseURL: "https://criminal-dance-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "criminal-dance",
+  storageBucket: "criminal-dance.firebasestorage.app",
+  messagingSenderId: "350274782193",
+  appId: "1:350274782193:web:79b949cada039893ecfa50",
+  measurementId: "G-GLPT9X5NN0"
+};
+const out = document.getElementById("out");
+const log = (html)=>{ out.innerHTML += "<div>"+html+"</div>"; };
+window.testResult = "running";
+(async()=>{
+  try{
+    firebase.initializeApp(firebaseConfig);
+    log("✅ initializeApp 成功");
+    const db = firebase.database();
+    const ref = db.ref("connection-test");
+    const payload = { msg:"hello", at:Date.now() };
+    await ref.set(payload);
+    log("✅ 寫入成功：<pre>"+JSON.stringify(payload)+"</pre>");
+    const snap = await ref.once("value");
+    const got = snap.val();
+    log("✅ 讀回成功：<pre>"+JSON.stringify(got)+"</pre>");
+    if(got && got.msg==="hello"){
+      log('<b class="ok">🎉 連線完全正常！可以開始做連線版了。</b>');
+      window.testResult = "pass";
+    } else {
+      log('<b class="err">讀回的資料怪怪的。</b>'); window.testResult="weird";
+    }
+  }catch(e){
+    log('<b class="err">❌ 失敗：'+e.message+'</b>');
+    log("可能原因：設定碼有誤、資料庫沒建、或權限規則擋住。");
+    window.testResult = "fail:"+e.message;
+  }
+})();
+</script>
+</body>
+</html>

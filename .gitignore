@@ -1,0 +1,8 @@
+# OS / 編輯器雜項
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log
+
+# 本機開發用的預覽伺服器設定（非遊戲本體，可不上傳）
+.claude/
