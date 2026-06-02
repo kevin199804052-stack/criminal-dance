@@ -88,7 +88,7 @@
   <h1>🕺 犯人在跳舞</h1>
   <div class="sub">本機同桌 ＆ 線上連線</div>
   <div id="app"></div>
-  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v29 · 逐玩家超時懲罰/交易說明修正/座位圖</div>
+  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v31 · 機器人名單更新/彩蛋直接贏整場(不加分)</div>
   <div id="toast" style="position:fixed;left:50%;bottom:30px;transform:translateX(-50%);
        background:#b02a4a;color:#fff;padding:12px 20px;border-radius:10px;font-size:1rem;
        opacity:0;transition:opacity .2s;pointer-events:none;z-index:99;max-width:90%;"></div>
@@ -456,7 +456,7 @@ function renderGameOver(){
   const matchBanner = g.matchWinner!=null
     ? `<div class="panel win center" style="border-color:#ffd34d">
          <div class="big" style="font-size:2rem;color:#ffd34d">🏆 ${pname(g.matchWinner)} 贏得整場！</div>
-         <div class="sub">率先達到 ${WIN_SCORE} 分</div>
+         <div class="sub">${g.easter?'觸發隱藏彩蛋，直接獲勝':'率先達到 '+WIN_SCORE+' 分'}</div>
        </div>`
     : "";
   const buttons = g.matchWinner!=null
@@ -762,11 +762,10 @@ function endTurn(){
   if(nxt<0){ gameOver("和局","沒有人還有手牌。"); return; }
   // 🎆 隱藏彩蛋：輪到的人手上「完全沒有可打的牌」（如 偵探,偵探,警部,犯人）→ 超稀有，直接 +10 分贏整場
   if(!hasPlayable(nxt)){
-    const pts=new Array(state.players.length).fill(0); pts[nxt]=10;
     const hand=state.players[nxt].hand.map(c=>CARDS[c].name).join('、');
     gameOver('🎆 天降好運（隱藏彩蛋）！',
-      `<b>${pname(nxt)}</b> 拿到一手完全打不出去的牌（${hand}），觸發超稀有彩蛋——直接 +10 分、贏得整場！`,
-      pts, true);
+      `<b>${pname(nxt)}</b> 拿到一手完全打不出去的牌（${hand}），觸發超稀有彩蛋——無論幾分，直接贏得整場！`,
+      null, true, nxt);   // 不加分、直接判 nxt 為整場贏家
     return;
   }
   state.current=nxt;
@@ -774,7 +773,7 @@ function endTurn(){
   render();
 }
 
-function gameOver(title, body, points, easter){
+function gameOver(title, body, points, easter, forcedWinner){
   points = (points || [0,0,0,0]).slice();
   // 警部結算：遊戲結束時，被盯的人若仍持有犯人牌 → 比照神犬 +3，與原結局並存（逐人取較高分）
   let inspectorHit=false;
@@ -789,7 +788,8 @@ function gameOver(title, body, points, easter){
   // 賽末判定：累積最高分達門檻、且為「唯一」最高者 → 贏得整場；同分並列則續賽
   const max=Math.max(...scores);
   const leaders=state.players.map((_,i)=>i).filter(i=>scores[i]===max);
-  const matchWinner = (max>=WIN_SCORE && leaders.length===1) ? leaders[0] : null;
+  let matchWinner = (max>=WIN_SCORE && leaders.length===1) ? leaders[0] : null;
+  if(forcedWinner!=null) matchWinner=forcedWinner;   // 彩蛋等情況：直接指定整場贏家
   state.gameover={title, body, points, matchWinner, easter:!!easter};
   // 顯示所有人手牌真相
   const truth=state.players.map(p=>`${p.name}: ${p.hand.map(c=>CARDS[c].name).join("、")||"空手"}`).join("<br>");
@@ -856,6 +856,9 @@ function getPlayerId(){
 }
 function loadName(){ try{ return localStorage.getItem('cd_name')||''; }catch(e){ return ''; } }   // 記住上次輸入的名字
 function saveName(n){ try{ localStorage.setItem('cd_name', n); }catch(e){} }
+function loadRoom(){ try{ return localStorage.getItem('cd_room')||''; }catch(e){ return ''; } }   // 記住上次房號(供重連)
+function saveRoom(c){ try{ localStorage.setItem('cd_room', c||''); }catch(e){} }
+const BOT_NAMES=['Erica04','一直委曲求全','ahang','坐著看花','ChengLin','Richard','ㄧㄨ','啾啾','qaintang','CICADA'];
 window.enterOnline=()=>{
   mode='online';
   net={ phase:'entry', code:null, playerId:getPlayerId(),
@@ -869,9 +872,10 @@ window.createRoom=async ()=>{
   const name=(document.getElementById('myname').value||'').trim();
   if(!name){ nope('請先輸入你的名字'); return; }
   net.myName=name; saveName(name); net.isHost=true; fbInit();
-  const code=genCode(); net.code=code;
+  const ws = +((document.getElementById('winsel')||{}).value || 10);   // 獲勝分數(5~10)
+  const code=genCode(); net.code=code; saveRoom(code);
   await db.ref('rooms/'+code).set({
-    host: net.playerId, status:'lobby',
+    host: net.playerId, status:'lobby', winScore: ws,
     createdAt: firebase.database.ServerValue.TIMESTAMP,
     players:{ [net.playerId]:{ name, joinedAt: firebase.database.ServerValue.TIMESTAMP } }
   });
@@ -883,11 +887,20 @@ window.joinRoom=async ()=>{
   const code=(document.getElementById('roomcode').value||'').trim().toUpperCase();
   if(!name){ nope('請先輸入你的名字'); return; }
   if(code.length!==4){ nope('房號是 4 個字'); return; }
-  net.myName=name; saveName(name); net.code=code; fbInit();
+  net.myName=name; saveName(name); net.code=code; saveRoom(code); fbInit();
   const roomRef=db.ref('rooms/'+code);
   const room=(await roomRef.once('value')).val();
   if(!room){ nope('找不到這個房間'); return; }
-  if(room.status!=='lobby'){ nope('遊戲已開始，無法加入'); return; }
+  if(room.status!=='lobby'){
+    // 遊戲進行中：只有「原本就在這局的玩家」(自己有 view) 能重新連線
+    const myView=(await roomRef.child('views/'+net.playerId).once('value')).val();
+    if(myView){
+      await roomRef.child('players/'+net.playerId).set({ name, joinedAt: firebase.database.ServerValue.TIMESTAMP });
+      attachRoom(code);   // 監聽→status playing→phase game + subscribeGame，接回自己的視圖
+      return;
+    }
+    nope('遊戲進行中，且你不是這局的玩家，無法加入'); return;
+  }
   if(room.players && Object.keys(room.players).length>=8){ nope('房間已滿（最多 8 人）'); return; }
   await roomRef.child('players/'+net.playerId).set({ name, joinedAt: firebase.database.ServerValue.TIMESTAMP });
   attachRoom(code);
@@ -958,7 +971,7 @@ window.hostStart=()=>{
   state.players.forEach((p,i)=>{ p.pid=ids[i]; p.bot=!!net.room.players[ids[i]].bot; });  // 座位 ↔ playerId、機器人標記
   const rs=(net.room&&net.room.scores)||{};
   scores=ids.map(pid=>rs[pid]||0);   // 依房間內 pid 延續系列賽分數（機器人也保留）；新房=0
-  WIN_SCORE=10;            // 線上系列賽門檻：先達 10 分者獲勝（常見預設，可調）
+  WIN_SCORE=(net.room&&net.room.winScore)||10;   // 開房時設定的獲勝分數(5~10)
   net.started=true; net.phase='game';
   net.penalty={}; net.timer=null; net.timerSig=null; net.deadline=null;   // 思考時間初始 30 秒，逐玩家超時懲罰
   const base='rooms/'+net.code;
@@ -979,6 +992,8 @@ window.backToLobby=(reset)=>{
 };
 // 任何人都能按「再來一局」→ 全體回大廳（分數保留），再由房主按開始
 window.toLobby=()=>{ if(net&&db) db.ref('rooms/'+net.code+'/status').set('lobby'); };
+// 整場結束後「再玩一場」→ 清空分數歸0、全體回大廳
+window.newSeries=()=>{ if(net&&db){ db.ref('rooms/'+net.code+'/scores').remove(); db.ref('rooms/'+net.code+'/status').set('lobby'); } };
 // 機器人：房主在大廳新增/移除（機器人由房主端自動隨機出牌）
 window.addBot=()=>{
   if(!net||!net.isHost||!db) return;
@@ -986,7 +1001,10 @@ window.addBot=()=>{
   if(Object.keys(players).length>=8){ nope('已達 8 人上限'); return; }
   const used=Object.keys(players).filter(k=>k.startsWith('bot')).map(k=>+k.slice(3));
   let n=1; while(used.includes(n)) n++;
-  db.ref('rooms/'+net.code+'/players/bot'+n).set({ name:'機器人'+n, bot:true, joinedAt:Date.now() });
+  const usedNames=Object.values(players).map(p=>p.name);              // 機器人名字隨機、且不與現有玩家重複
+  const avail=BOT_NAMES.filter(nm=>!usedNames.includes(nm));
+  const name = avail.length ? avail[Math.floor(Math.random()*avail.length)] : ('機器人'+n);
+  db.ref('rooms/'+net.code+'/players/bot'+n).set({ name, bot:true, joinedAt:Date.now() });
 };
 window.removeBot=()=>{
   if(!net||!net.isHost||!db) return;
@@ -1288,8 +1306,8 @@ function renderNetGameOver(pub){
   const rows=pub.players.map((p,i)=>({name:p.name,s:pub.scores?pub.scores[i]:0})).sort((a,b)=>b.s-a.s).map(r=>`<div style="padding:3px 0">${r.name}：<b>${r.s}</b></div>`).join('');
   let footer;
   if(g.matchWinner>=0){            // 有人達到門檻 → 系列賽結束
-    footer=`<div class="panel win center" style="border-color:#ffd34d"><div class="big" style="font-size:1.7rem;color:#ffd34d">🏆 ${pub.players[g.matchWinner].name} 達 ${target} 分，贏得整場！</div></div>`+
-      `<div class="panel center">`+(net.isHost?`<button onclick="backToLobby(true)">回大廳（開新賽局，分數歸零）</button>`:`<div class="sub">系列賽結束，等待房主</div>`)+`<button class="ghost" onclick="leaveToEntry()">離開（回輸房號畫面）</button></div>`;
+    footer=`<div class="panel win center" style="border-color:#ffd34d"><div class="big" style="font-size:1.7rem;color:#ffd34d">🏆 ${pub.players[g.matchWinner].name} ${g.easter?'觸發彩蛋，直接贏得整場！':'達 '+target+' 分，贏得整場！'}</div></div>`+
+      `<div class="panel center">`+`<button onclick="newSeries()">再玩一場（分數歸零）</button>`+`<button class="ghost" onclick="leaveToEntry()">離開（回輸房號畫面）</button></div>`;
   } else {                         // 尚未分出整場 → 任何人都能按「再來一局」回大廳(分數保留)
     footer=`<div class="panel center">`+
       `<button onclick="toLobby()">再來一局（回大廳，分數續累積）</button>`+
@@ -1308,14 +1326,17 @@ function netRender(){
 }
 
 function netEntry(){
+  const opts=[5,6,7,8,9,10].map(n=>`<option value="${n}" ${n===10?'selected':''}>${n} 分</option>`).join('');
   app.innerHTML=`
     <div class="panel">
       <div class="big">🌐 線上連線</div>
       <input id="myname" placeholder="你的名字" value="${net.myName||''}">
+      <label style="display:block;margin:8px 0">獲勝分數：<select id="winsel" style="font-size:1rem;padding:6px;border-radius:8px">${opts}</select>（先達此分者贏得整場）</label>
       <button onclick="createRoom()">建立新房間（你當房主）</button>
       <hr style="border-color:#4a3d80;margin:14px 0">
-      <input id="roomcode" placeholder="輸入房號（4 個字）" maxlength="4" style="text-transform:uppercase">
+      <input id="roomcode" placeholder="輸入房號（4 個字）" maxlength="4" style="text-transform:uppercase" value="${loadRoom()}">
       <button onclick="joinRoom()">加入房間</button>
+      <div class="sub" style="margin-top:6px">斷線後可用同一房號重新加入（會接回原本的遊戲）</div>
       <button class="ghost" onclick="net=null;mode=null;render()">← 回主選單</button>
     </div>`;
 }
