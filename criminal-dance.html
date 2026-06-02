@@ -89,7 +89,7 @@
   <h1>🕺 犯人在跳舞</h1>
   <div class="sub">本機同桌 ＆ 線上連線</div>
   <div id="app"></div>
-  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v38 · 安全性:線上改匿名登入(uid 當身分)，準備上安全規則</div>
+  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v39 · 安全性:手牌(views)移到獨立節點，準備上安全規則保護手牌</div>
   <div id="toast" style="position:fixed;left:50%;bottom:30px;transform:translateX(-50%);
        background:#b02a4a;color:#fff;padding:12px 20px;border-radius:10px;font-size:1rem;
        opacity:0;transition:opacity .2s;pointer-events:none;z-index:99;max-width:90%;"></div>
@@ -929,11 +929,11 @@ window.joinRoom=async ()=>{
   if(room.status!=='lobby'){
     // 重連：先看目前 id 有沒有座位(view)；沒有就用記住的上次身分(cd_lastpid)接回
     let recPid=net.playerId;
-    let myView=(await roomRef.child('views/'+recPid).once('value')).val();
+    let myView=(await db.ref('views/'+code+'/'+recPid).once('value')).val();
     if(!myView){
       const lp=loadLastPid();
       if(lp && lp!==recPid){
-        const v2=(await roomRef.child('views/'+lp).once('value')).val();
+        const v2=(await db.ref('views/'+code+'/'+lp).once('value')).val();
         if(v2){ recPid=lp; myView=v2; net.playerId=recPid; try{sessionStorage.setItem('cd_pid',recPid);}catch(e){} }
       }
     }
@@ -984,7 +984,7 @@ window.leaveRoom=()=>{
     const players=(net.room&&net.room.players)||{};
     const humansLeft=Object.keys(players).filter(pid=>pid!==net.playerId && !players[pid].bot);
     net.ref.off();
-    if(humansLeft.length===0) db.ref('rooms/'+net.code).remove();   // 真人都退光（只剩機器人/沒人）→ 關閉整個房間
+    if(humansLeft.length===0){ db.ref('rooms/'+net.code).remove(); db.ref('views/'+net.code).remove(); }   // 真人都退光（只剩機器人/沒人）→ 關閉整個房間(連手牌一起清)
     else net.ref.child('players/'+net.playerId).remove();
   }
   net=null; mode=null; render();
@@ -997,7 +997,7 @@ window.leaveToEntry=()=>{
     const players=(net.room&&net.room.players)||{};
     const humansLeft=Object.keys(players).filter(pid=>pid!==net.playerId && !players[pid].bot);
     net.ref.off();
-    if(humansLeft.length===0) db.ref('rooms/'+net.code).remove();   // 真人退光→關房
+    if(humansLeft.length===0){ db.ref('rooms/'+net.code).remove(); db.ref('views/'+net.code).remove(); }   // 真人退光→關房(連手牌一起清)
     else net.ref.child('players/'+net.playerId).remove();
   }
   mode='online';
@@ -1196,7 +1196,7 @@ function broadcast(){
   db.ref(base+'/public').set(JSON.parse(JSON.stringify(pub)));
   state.players.forEach((p,i)=>{
     const v=viewForSeat(i); v.seat=i;
-    db.ref(base+'/views/'+p.pid).set(JSON.parse(JSON.stringify(v)));
+    db.ref('views/'+net.code+'/'+p.pid).set(JSON.parse(JSON.stringify(v)));   // 手牌獨立放 views/{房號}/{玩家}，與公開房間分開，安全規則才能「只讓本人讀」
   });
   const sbp={}; state.players.forEach((p,i)=>{ sbp[p.pid]=scores[i]||0; });   // 累積分數依 pid 存房間(供大廳/續局/機器人保留)
   db.ref(base+'/scores').set(sbp);
@@ -1320,7 +1320,7 @@ function subscribeGame(){
   if(net.gameSub) return; net.gameSub=true;
   const base='rooms/'+net.code;
   db.ref(base+'/public').on('value', s=>{ net.pub=s.val(); if(net.phase==='game') render(); });
-  db.ref(base+'/views/'+net.playerId).on('value', s=>{ net.view=s.val(); if(net.phase==='game') render(); });
+  db.ref('views/'+net.code+'/'+net.playerId).on('value', s=>{ net.view=s.val(); if(net.phase==='game') render(); });
 }
 
 function netGame(){
