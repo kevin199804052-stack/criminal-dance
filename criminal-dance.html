@@ -88,7 +88,7 @@
   <h1>🕺 犯人在跳舞</h1>
   <div class="sub">本機同桌 ＆ 線上連線</div>
   <div id="app"></div>
-  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v28 · 非房主也能按再來一局回大廳</div>
+  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v29 · 逐玩家超時懲罰/交易說明修正/座位圖</div>
   <div id="toast" style="position:fixed;left:50%;bottom:30px;transform:translateX(-50%);
        background:#b02a4a;color:#fff;padding:12px 20px;border-radius:10px;font-size:1rem;
        opacity:0;transition:opacity .2s;pointer-events:none;z-index:99;max-width:90%;"></div>
@@ -121,7 +121,7 @@ const CARDS = {
   witness:     { name:"目擊者",     desc:"指定一人，偷看他的全部手牌。" },
   infoManip:   { name:"情報交換",   desc:"全體同時把一張手牌傳給左邊的人，每人自己選要傳哪張。" },
   rumor:       { name:"謠言",       desc:"全體同時從右邊的人手牌盲抽一張。" },
-  trade:       { name:"交易",       desc:"指定一人，你給他一張（你選），盲抽回他一張。" },
+  trade:       { name:"交易",       desc:"指定一人，雙方各自選一張手牌，同時互相交換（看不到對方選哪張）。" },
   boy:         { name:"少年",       desc:"得知誰是犯人（誰持有犯人牌）。" },
   dog:         { name:"神犬",       desc:"指定一人，由他自己選一張棄掉；若棄到犯人牌你獲勝，否則神犬牌交給他。" },
   inspector:   { name:"警部",       desc:"手牌≤3可打，指定一人並公開盯著他；遊戲結束時他若仍持有犯人牌，你獲勝（+3）。（在手上時不公開）" },
@@ -478,6 +478,21 @@ function renderGameOver(){
 
 function logHtml(){
   return `<div class="log">${state.log.map(l=>`<div>${l}</div>`).join("")}</div>`;
+}
+// 座位相對位置圖（順時針圓圈，標出你與左右鄰）
+function seatingHtml(players, mySeat){
+  const N=players.length, R=70, C=95; let dots='';
+  for(let i=0;i<N;i++){
+    const ang=(-90 + i*360/N)*Math.PI/180;
+    const x=(C+R*Math.cos(ang)).toFixed(0), y=(C+R*Math.sin(ang)).toFixed(0), me=i===mySeat;
+    dots+=`<div style="position:absolute;left:${x}px;top:${y}px;transform:translate(-50%,-50%);background:${me?'#ffd34d':'#3a3260'};color:${me?'#2a2150':'#f2eefb'};border-radius:10px;padding:3px 7px;font-size:.78rem;white-space:nowrap;font-weight:${me?700:400}">${me?'🟢 ':''}${players[i].name}</div>`;
+  }
+  const L=(mySeat-1+N)%N, Rr=(mySeat+1)%N;
+  return `<div class="panel" style="padding:10px">`+
+    `<div class="sub" style="text-align:center">🪑 座位（順時針）</div>`+
+    `<div style="position:relative;width:190px;height:190px;margin:6px auto">${dots}</div>`+
+    `<div class="sub" style="text-align:center;line-height:1.7">⬅ 左鄰 <b style="color:#ffd34d">${players[L].name}</b>（情報交換傳給他）<br>右鄰 <b style="color:#ffd34d">${players[Rr].name}</b> ➡（謠言從他抽）</div>`+
+    `</div>`;
 }
 // 彩蛋煙火特效
 function fireworksHtml(){
@@ -945,7 +960,7 @@ window.hostStart=()=>{
   scores=ids.map(pid=>rs[pid]||0);   // 依房間內 pid 延續系列賽分數（機器人也保留）；新房=0
   WIN_SCORE=10;            // 線上系列賽門檻：先達 10 分者獲勝（常見預設，可調）
   net.started=true; net.phase='game';
-  net.turnLimit=30; net.timer=null; net.timerSig=null; net.deadline=null;   // 思考時間初始 30 秒
+  net.penalty={}; net.timer=null; net.timerSig=null; net.deadline=null;   // 思考時間初始 30 秒，逐玩家超時懲罰
   const base='rooms/'+net.code;
   db.ref(base+'/status').set('playing');
   db.ref(base+'/status').onDisconnect().set('lobby');   // 房主離線→結束本局回大廳（搭配房主轉移）
@@ -1065,7 +1080,8 @@ function resolveTradeOnline(){
   if(cb!=null) removeCard(state.players[b], cb);
   if(ca!=null) state.players[b].hand.push(ca);
   if(cb!=null) state.players[a].hand.push(cb);
-  log(`${pname(a)} 與 ${pname(b)} 同時交換了手牌。`);
+  log((ca!=null&&cb!=null) ? `${pname(a)} 與 ${pname(b)} 交換了一張手牌。`
+                           : `${pname(a)} 與 ${pname(b)} 進行交易（一方無牌，單向給牌）。`);
   state.pending=null; endTurn();
 }
 // 線上情報交換：全部人都選好後，同時抽離、同時傳給各自左邊
@@ -1096,7 +1112,8 @@ function broadcast(){
   const base='rooms/'+net.code, pub=localPub();
   db.ref(base+'/public').set(JSON.parse(JSON.stringify(pub)));
   state.players.forEach((p,i)=>{
-    db.ref(base+'/views/'+p.pid).set(JSON.parse(JSON.stringify(viewForSeat(i))));
+    const v=viewForSeat(i); v.seat=i;
+    db.ref(base+'/views/'+p.pid).set(JSON.parse(JSON.stringify(v)));
   });
   const sbp={}; state.players.forEach((p,i)=>{ sbp[p.pid]=scores[i]||0; });   // 累積分數依 pid 存房間(供大廳/續局/機器人保留)
   db.ref(base+'/scores').set(sbp);
@@ -1112,8 +1129,9 @@ function applyAction(a){
     const seat=state.players.findIndex(p=>p.pid===a.by);
     if((seat===a0||seat===b0) && state.players[seat].hand.length>0 && state.pending.tradePicks[seat]===undefined){
       state.pending.tradePicks[seat]=state.players[seat].hand[a.payload];
+      if(net.penalty) delete net.penalty[a.by];   // 正常行動→解除該玩家的超時懲罰
       const req=[a0,b0].filter(s=>state.players[s].hand.length>0);
-      if(req.every(s=>state.pending.tradePicks[s]!==undefined)){ clearTurnTimer(); net.turnLimit=30; resolveTradeOnline(); }
+      if(req.every(s=>state.pending.tradePicks[s]!==undefined)){ clearTurnTimer(); resolveTradeOnline(); }
       else broadcast();
     }
     return;
@@ -1124,7 +1142,8 @@ function applyAction(a){
     const seat=state.players.findIndex(p=>p.pid===a.by);
     if(seat>=0 && state.pending.queue.includes(seat) && state.pending.picks[seat]===undefined){
       state.pending.picks[seat]=state.players[seat].hand[a.payload];
-      if(state.pending.queue.every(q=>state.pending.picks[q]!==undefined)){ clearTurnTimer(); net.turnLimit=30; resolveInfoSwapOnline(); }
+      if(net.penalty) delete net.penalty[a.by];   // 正常行動→解除該玩家的超時懲罰
+      if(state.pending.queue.every(q=>state.pending.picks[q]!==undefined)){ clearTurnTimer(); resolveInfoSwapOnline(); }
       else broadcast();
     }
     return;
@@ -1133,7 +1152,7 @@ function applyAction(a){
   if(sp.actor<0) return;
   if(a.by!==state.players[sp.actor].pid) return;   // 只接受「該操作的人」
   if(a.type!==sp.ui.act) return;                    // 型別需符合當前期待
-  clearTurnTimer(); net.turnLimit=30;               // 有人正常行動 → 思考時間恢復 30 秒
+  clearTurnTimer(); if(net.penalty) delete net.penalty[a.by];   // 正常行動 → 解除該玩家的超時懲罰(回30秒)
   switch(a.type){
     case 'play': playCard(a.payload); break;
     case 'target': chooseTarget(a.payload); break;
@@ -1148,34 +1167,42 @@ function applyAction(a){
 
 // ---- 思考時間限制（房主端）：初始30秒；超時自動隨機出牌且降為10秒；有人正常行動後恢復30秒 ----
 function clearTurnTimer(){ if(net&&net.timer){ clearTimeout(net.timer); net.timer=null; } if(net&&net.botTimer){ clearTimeout(net.botTimer); net.botTimer=null; } if(net) net.timerSig=null; }
+// 此步驟需要決策的人(pid 陣列)
+function deciderPids(){
+  if(tradeCollecting()){ const a=state.current,b=state.pending.target; return [a,b].filter(s=>state.players[s].hand.length>0).map(s=>state.players[s].pid); }
+  if(infoCollecting()){ return state.pending.queue.map(s=>state.players[s].pid); }
+  const sp=seatPrompt(); return sp.actor<0? [] : [state.players[sp.actor].pid];
+}
 function maybeArmTimer(){
   if(!net || !net.isHost) return;
   if(state.gameover){ clearTurnTimer(); net.deadline=null; return; }
   const collecting = infoCollecting() || tradeCollecting();
-  const sp = collecting? {actor:0} : seatPrompt();
-  if(sp.actor<0 && !collecting){ clearTurnTimer(); net.deadline=null; return; }
-  const sig = collecting? 'swap' : (state.phase+':'+sp.actor);
-  if(sig===net.timerSig) return;          // 同一步：不重設，沿用原本的 deadline
+  const actorPids = deciderPids();
+  if(actorPids.length===0){ clearTurnTimer(); net.deadline=null; return; }
+  const sig = collecting? 'collect' : (state.phase+':'+actorPids[0]);
+  if(sig===net.timerSig) return;          // 同一步：不重設，沿用原本 deadline
   if(net.timer) clearTimeout(net.timer);
   net.timerSig=sig;
-  const ms=(net.turnLimit||30)*1000;
+  // 逐玩家懲罰：此步驟的決策者中若有人「上次超時過」→ 只給 10 秒，否則 30 秒
+  const penalized = actorPids.some(pid=>net.penalty&&net.penalty[pid]);
+  const ms=(penalized?10:30)*1000;
   net.deadline=Date.now()+ms;
   net.timer=setTimeout(autoPlay, ms);
 }
 function autoPlay(){
   if(!net || !net.isHost || state.gameover) return;
   net.timer=null;
-  net.turnLimit=10;                        // 超時懲罰：後續變 10 秒
   if(tradeCollecting()){
     const a=state.current,b=state.pending.target;
-    [a,b].forEach(s=>{ if(state.players[s].hand.length>0 && state.pending.tradePicks[s]===undefined){ const h=state.players[s].hand; state.pending.tradePicks[s]=h[Math.random()*h.length|0]; } });
+    [a,b].forEach(s=>{ if(state.players[s].hand.length>0 && state.pending.tradePicks[s]===undefined){ net.penalty[state.players[s].pid]=true; const h=state.players[s].hand; state.pending.tradePicks[s]=h[Math.random()*h.length|0]; } });
     log('交易思考超時，未選者自動隨機。'); resolveTradeOnline(); return;
   }
   if(infoCollecting()){
-    state.pending.queue.forEach(seat=>{ if(state.pending.picks[seat]===undefined){ const h=state.players[seat].hand; state.pending.picks[seat]=h[Math.random()*h.length|0]; } });
+    state.pending.queue.forEach(seat=>{ if(state.pending.picks[seat]===undefined){ net.penalty[state.players[seat].pid]=true; const h=state.players[seat].hand; state.pending.picks[seat]=h[Math.random()*h.length|0]; } });
     log('情報交換思考超時，未選者自動隨機。'); resolveInfoSwapOnline(); return;
   }
   const sp=seatPrompt(); if(sp.actor<0) return; const ui=sp.ui;
+  net.penalty[state.players[sp.actor].pid]=true;   // 此人超時 → 之後其思考時間變 10 秒（直到他正常行動）
   const who=pname(sp.actor);
   if(ui.kind==='turn'){
     const ok=ui.cards.filter(c=>c.ok);
@@ -1219,7 +1246,8 @@ function netGame(){
     broadcast();
     const hi=state.players.findIndex(p=>p.pid===net.playerId);
     if(hi<0){ app.innerHTML='<div class="panel center">準備中…</div>'; return; }
-    renderGameView(localPub(), viewForSeat(hi));
+    const v=viewForSeat(hi); v.seat=hi;
+    renderGameView(localPub(), v);
   } else {
     if(!net.pub){ app.innerHTML='<div class="panel center">載入中…</div>'; return; }
     renderGameView(net.pub, net.view||{hand:[],ui:{kind:'wait'}});
@@ -1248,7 +1276,8 @@ function renderGameView(pub, view){
   const strip = pub&&pub.players ? `<div class="sub" style="margin-top:8px">總分　${pub.players.map((p,i)=>p.name+' '+(pub.scores?pub.scores[i]:0)).join('　·　')}</div>` : '';
   const insp = pub&&pub.inspectorTarget>=0 ? `<div class="panel center" style="border-color:#ffd34d;padding:10px;margin-top:10px">👮 警部盯著 <b style="color:#ffd34d">${pub.players[pub.inspectorTarget].name}</b></div>` : '';
   const logH = pub&&pub.log ? `<div class="log">${pub.log.map(l=>`<div>${l}</div>`).join('')}</div>` : '';
-  app.innerHTML=`<div class="panel"><div class="sub">房號 ${net.code} <span id="cd" style="color:#ffd34d;font-weight:700"></span></div>${area}${strip}</div>${insp}${logH}`;
+  const seat = (pub&&pub.players&&view&&view.seat!=null) ? seatingHtml(pub.players, view.seat) : '';
+  app.innerHTML=`<div class="panel"><div class="sub">房號 ${net.code} <span id="cd" style="color:#ffd34d;font-weight:700"></span></div>${area}${strip}</div>${insp}${seat}${logH}`;
 }
 
 function renderNetGameOver(pub){
