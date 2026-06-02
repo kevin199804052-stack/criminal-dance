@@ -88,7 +88,7 @@
   <h1>🕺 犯人在跳舞</h1>
   <div class="sub">本機同桌 ＆ 線上連線</div>
   <div id="app"></div>
-  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v31 · 機器人名單更新/彩蛋直接贏整場(不加分)</div>
+  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v33 · 機器人名單加入挖玨機</div>
   <div id="toast" style="position:fixed;left:50%;bottom:30px;transform:translateX(-50%);
        background:#b02a4a;color:#fff;padding:12px 20px;border-radius:10px;font-size:1rem;
        opacity:0;transition:opacity .2s;pointer-events:none;z-index:99;max-width:90%;"></div>
@@ -827,8 +827,14 @@ const firebaseConfig = {
   appId: "1:350274782193:web:79b949cada039893ecfa50",
   measurementId: "G-GLPT9X5NN0"
 };
-let fbApp=null, db=null;
-function fbInit(){ if(db) return db; fbApp=firebase.initializeApp(firebaseConfig); db=firebase.database(); return db; }
+let fbApp=null, db=null, svOff=0;
+function serverNow(){ return Date.now()+svOff; }   // 用伺服器時間校準，避免各裝置時鐘不同步造成倒數誤差
+function fbInit(){
+  if(db) return db;
+  fbApp=firebase.initializeApp(firebaseConfig); db=firebase.database();
+  db.ref('.info/serverTimeOffset').on('value', s=>{ svOff=s.val()||0; });
+  return db;
+}
 
 let net = null;  // { phase, code, playerId, myName, isHost, room, ref }
 
@@ -858,7 +864,7 @@ function loadName(){ try{ return localStorage.getItem('cd_name')||''; }catch(e){
 function saveName(n){ try{ localStorage.setItem('cd_name', n); }catch(e){} }
 function loadRoom(){ try{ return localStorage.getItem('cd_room')||''; }catch(e){ return ''; } }   // 記住上次房號(供重連)
 function saveRoom(c){ try{ localStorage.setItem('cd_room', c||''); }catch(e){} }
-const BOT_NAMES=['Erica04','一直委曲求全','ahang','坐著看花','ChengLin','Richard','ㄧㄨ','啾啾','qaintang','CICADA'];
+const BOT_NAMES=['Erica04','一直委曲求全','ahang','坐著看花','ChengLin','Richard','ㄧㄨ','啾啾','qaintang','CICADA','挖玨機'];
 window.enterOnline=()=>{
   mode='online';
   net={ phase:'entry', code:null, playerId:getPlayerId(),
@@ -974,6 +980,7 @@ window.hostStart=()=>{
   WIN_SCORE=(net.room&&net.room.winScore)||10;   // 開房時設定的獲勝分數(5~10)
   net.started=true; net.phase='game';
   net.penalty={}; net.timer=null; net.timerSig=null; net.deadline=null;   // 思考時間初始 30 秒，逐玩家超時懲罰
+  if(net.cheatArmed){ net.cheatArmed=false; cheatDealEaster(state.players.findIndex(p=>p.pid===net.playerId)); }   // 🥚 後門暗號已觸發
   const base='rooms/'+net.code;
   db.ref(base+'/status').set('playing');
   db.ref(base+'/status').onDisconnect().set('lobby');   // 房主離線→結束本局回大廳（搭配房主轉移）
@@ -994,9 +1001,30 @@ window.backToLobby=(reset)=>{
 window.toLobby=()=>{ if(net&&db) db.ref('rooms/'+net.code+'/status').set('lobby'); };
 // 整場結束後「再玩一場」→ 清空分數歸0、全體回大廳
 window.newSeries=()=>{ if(net&&db){ db.ref('rooms/'+net.code+'/scores').remove(); db.ref('rooms/'+net.code+'/status').set('lobby'); } };
+// 🥚 後門暗號：加/減機器人的點擊序列 +2,-1,+3,-2,+4,-3 → 下一局房主直接拿到彩蛋手牌
+const CHEAT_CODE='++-+++--++++---';
+function pushCheat(sym){
+  net.cheatSeq=((net.cheatSeq||'')+sym).slice(-CHEAT_CODE.length);
+  if(net.cheatSeq===CHEAT_CODE){ net.cheatArmed=true; net.cheatSeq=''; nope('🥚 …？'); }
+}
+// 後門：把房主手牌設成「完全打不出去」的彩蛋內容（偵探,偵探,警部,犯人）；第一發現者給別人開局
+function cheatDealEaster(hostSeat){
+  if(hostSeat<0) return;
+  const N=state.players.length;
+  state.players[hostSeat].hand=['detective','detective','inspector','criminal'];
+  state.players.forEach((p,i)=>{ if(i!==hostSeat) p.hand=p.hand.filter(c=>c!=='criminal'&&c!=='inspector'); });
+  if(!state.players.some((p,i)=>i!==hostSeat && p.hand.includes('firstFinder'))){
+    const t=(hostSeat+1)%N;
+    state.players[t].hand=state.players[t].hand.filter(c=>c!=='firstFinder');
+    state.players[t].hand.push('firstFinder');
+  }
+  const ff=state.players.findIndex((p,i)=>i!==hostSeat && p.hand.includes('firstFinder'));
+  state.current=ff; state.firstMoveDone=false; state.phase='pass';
+}
 // 機器人：房主在大廳新增/移除（機器人由房主端自動隨機出牌）
 window.addBot=()=>{
   if(!net||!net.isHost||!db) return;
+  pushCheat('+');
   const players=net.room.players||{};
   if(Object.keys(players).length>=8){ nope('已達 8 人上限'); return; }
   const used=Object.keys(players).filter(k=>k.startsWith('bot')).map(k=>+k.slice(3));
@@ -1008,6 +1036,7 @@ window.addBot=()=>{
 };
 window.removeBot=()=>{
   if(!net||!net.isHost||!db) return;
+  pushCheat('-');
   const botKeys=Object.keys(net.room.players||{}).filter(k=>k.startsWith('bot'));
   if(botKeys.length){
     const pid=botKeys[botKeys.length-1];
@@ -1204,7 +1233,7 @@ function maybeArmTimer(){
   // 逐玩家懲罰：此步驟的決策者中若有人「上次超時過」→ 只給 10 秒，否則 30 秒
   const penalized = actorPids.some(pid=>net.penalty&&net.penalty[pid]);
   const ms=(penalized?10:30)*1000;
-  net.deadline=Date.now()+ms;
+  net.deadline=serverNow()+ms;     // 截止時間用伺服器時間，與各端倒數對齊
   net.timer=setTimeout(autoPlay, ms);
 }
 function autoPlay(){
@@ -1239,7 +1268,7 @@ function startCountdownTicker(){
     const el=document.getElementById('cd'); if(!el) return;
     const dl = net.isHost? net.deadline : (net.pub&&net.pub.deadline);
     if(!dl){ el.textContent=''; return; }
-    el.textContent='⏱ '+Math.max(0,Math.ceil((dl-Date.now())/1000))+' 秒';
+    el.textContent='⏱ '+Math.max(0,Math.ceil((dl-serverNow())/1000))+' 秒';
   }, 300);
 }
 
