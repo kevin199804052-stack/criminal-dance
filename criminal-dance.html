@@ -88,7 +88,7 @@
   <h1>🕺 犯人在跳舞</h1>
   <div class="sub">本機同桌 ＆ 線上連線</div>
   <div id="app"></div>
-  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v33 · 機器人名單加入挖玨機</div>
+  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v36 · 後門彩蛋:房主排先手下一位確保觸發；情報交換/謠言記錄打出者</div>
   <div id="toast" style="position:fixed;left:50%;bottom:30px;transform:translateX(-50%);
        background:#b02a4a;color:#fff;padding:12px 20px;border-radius:10px;font-size:1rem;
        opacity:0;transition:opacity .2s;pointer-events:none;z-index:99;max-width:90%;"></div>
@@ -594,13 +594,13 @@ function resolveSimple(card, idx){
       break;
     }
     case "infoManip":{
-      // 全體各自選一張傳給左邊：依序把畫面交給每位有手牌的玩家來選
+      log(`${me.name} 打出「情報交換」（全體各傳一張給左邊）。`);
       startInfoSwap();
       break;
     }
     case "rumor":{
+      log(`${me.name} 打出「謠言」（全體從右邊盲抽一張）。`);
       doRumor();
-      log(`「謠言」：全體從右邊盲抽了一張牌。`);
       endTurn(); break;
     }
     case "criminal":{
@@ -764,8 +764,8 @@ function endTurn(){
   if(!hasPlayable(nxt)){
     const hand=state.players[nxt].hand.map(c=>CARDS[c].name).join('、');
     gameOver('🎆 天降好運（隱藏彩蛋）！',
-      `<b>${pname(nxt)}</b> 拿到一手完全打不出去的牌（${hand}），觸發超稀有彩蛋——無論幾分，直接贏得整場！`,
-      null, true, nxt);   // 不加分、直接判 nxt 為整場贏家
+      `<b>${pname(nxt)}</b> 拿到一手完全打不出去的牌（${hand}），觸發超稀有彩蛋——分數直接衝到 ${WIN_SCORE} 分、贏得整場！`,
+      null, true, nxt);   // 分數拉到門檻、直接判 nxt 為整場贏家
     return;
   }
   state.current=nxt;
@@ -785,6 +785,7 @@ function gameOver(title, body, points, easter, forcedWinner){
     body += `<br>👮 警部 ${pname(state.inspector.by)} 指認 ${pname(state.inspector.target)} 成功！（+3）`;
   }
   points.forEach((pt,i)=>{ scores[i]+=pt; });   // 計入累積總分
+  if(forcedWinner!=null) scores[forcedWinner]=Math.max(scores[forcedWinner]||0, WIN_SCORE);  // 彩蛋：分數直接拉到獲勝門檻(顯示為最高分)
   // 賽末判定：累積最高分達門檻、且為「唯一」最高者 → 贏得整場；同分並列則續賽
   const max=Math.max(...scores);
   const leaders=state.players.map((_,i)=>i).filter(i=>scores[i]===max);
@@ -864,6 +865,8 @@ function loadName(){ try{ return localStorage.getItem('cd_name')||''; }catch(e){
 function saveName(n){ try{ localStorage.setItem('cd_name', n); }catch(e){} }
 function loadRoom(){ try{ return localStorage.getItem('cd_room')||''; }catch(e){ return ''; } }   // 記住上次房號(供重連)
 function saveRoom(c){ try{ localStorage.setItem('cd_room', c||''); }catch(e){} }
+function loadLastPid(){ try{ return localStorage.getItem('cd_lastpid')||''; }catch(e){ return ''; } }   // 記住上次身分id(關掉分頁後仍能重連)
+function saveLastPid(p){ try{ localStorage.setItem('cd_lastpid', p||''); }catch(e){} }
 const BOT_NAMES=['Erica04','一直委曲求全','ahang','坐著看花','ChengLin','Richard','ㄧㄨ','啾啾','qaintang','CICADA','挖玨機'];
 window.enterOnline=()=>{
   mode='online';
@@ -879,7 +882,7 @@ window.createRoom=async ()=>{
   if(!name){ nope('請先輸入你的名字'); return; }
   net.myName=name; saveName(name); net.isHost=true; fbInit();
   const ws = +((document.getElementById('winsel')||{}).value || 10);   // 獲勝分數(5~10)
-  const code=genCode(); net.code=code; saveRoom(code);
+  const code=genCode(); net.code=code; saveRoom(code); saveLastPid(net.playerId);
   await db.ref('rooms/'+code).set({
     host: net.playerId, status:'lobby', winScore: ws,
     createdAt: firebase.database.ServerValue.TIMESTAMP,
@@ -898,10 +901,19 @@ window.joinRoom=async ()=>{
   const room=(await roomRef.once('value')).val();
   if(!room){ nope('找不到這個房間'); return; }
   if(room.status!=='lobby'){
-    // 遊戲進行中：只有「原本就在這局的玩家」(自己有 view) 能重新連線
-    const myView=(await roomRef.child('views/'+net.playerId).once('value')).val();
+    // 重連：先看目前 id 有沒有座位(view)；沒有就用記住的上次身分(cd_lastpid)接回
+    let recPid=net.playerId;
+    let myView=(await roomRef.child('views/'+recPid).once('value')).val();
+    if(!myView){
+      const lp=loadLastPid();
+      if(lp && lp!==recPid){
+        const v2=(await roomRef.child('views/'+lp).once('value')).val();
+        if(v2){ recPid=lp; myView=v2; net.playerId=recPid; try{sessionStorage.setItem('cd_pid',recPid);}catch(e){} }
+      }
+    }
     if(myView){
-      await roomRef.child('players/'+net.playerId).set({ name, joinedAt: firebase.database.ServerValue.TIMESTAMP });
+      await roomRef.child('players/'+recPid).set({ name, joinedAt: firebase.database.ServerValue.TIMESTAMP });
+      saveLastPid(recPid);
       attachRoom(code);   // 監聽→status playing→phase game + subscribeGame，接回自己的視圖
       return;
     }
@@ -909,6 +921,7 @@ window.joinRoom=async ()=>{
   }
   if(room.players && Object.keys(room.players).length>=8){ nope('房間已滿（最多 8 人）'); return; }
   await roomRef.child('players/'+net.playerId).set({ name, joinedAt: firebase.database.ServerValue.TIMESTAMP });
+  saveLastPid(net.playerId);
   attachRoom(code);
 };
 
@@ -1007,19 +1020,16 @@ function pushCheat(sym){
   net.cheatSeq=((net.cheatSeq||'')+sym).slice(-CHEAT_CODE.length);
   if(net.cheatSeq===CHEAT_CODE){ net.cheatArmed=true; net.cheatSeq=''; nope('🥚 …？'); }
 }
-// 後門：把房主手牌設成「完全打不出去」的彩蛋內容（偵探,偵探,警部,犯人）；第一發現者給別人開局
+// 後門：房主拿「完全打不出去」的彩蛋手牌；並讓「房主的前一位」當先手→先手打完第一發現者(不動手牌)立刻輪到房主，確保彩蛋觸發
 function cheatDealEaster(hostSeat){
   if(hostSeat<0) return;
   const N=state.players.length;
   state.players[hostSeat].hand=['detective','detective','inspector','criminal'];
   state.players.forEach((p,i)=>{ if(i!==hostSeat) p.hand=p.hand.filter(c=>c!=='criminal'&&c!=='inspector'); });
-  if(!state.players.some((p,i)=>i!==hostSeat && p.hand.includes('firstFinder'))){
-    const t=(hostSeat+1)%N;
-    state.players[t].hand=state.players[t].hand.filter(c=>c!=='firstFinder');
-    state.players[t].hand.push('firstFinder');
-  }
-  const ff=state.players.findIndex((p,i)=>i!==hostSeat && p.hand.includes('firstFinder'));
-  state.current=ff; state.firstMoveDone=false; state.phase='pass';
+  const starter=(hostSeat-1+N)%N;                          // 房主的前一位當先手 → 房主第二棒
+  state.players.forEach(p=>{ p.hand=p.hand.filter(c=>c!=='firstFinder'); });
+  state.players[starter].hand.push('firstFinder');
+  state.current=starter; state.firstMoveDone=false; state.phase='pass';
 }
 // 機器人：房主在大廳新增/移除（機器人由房主端自動隨機出牌）
 window.addBot=()=>{
