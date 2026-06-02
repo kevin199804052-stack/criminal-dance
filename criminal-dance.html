@@ -88,7 +88,7 @@
   <h1>🕺 犯人在跳舞</h1>
   <div class="sub">本機同桌 ＆ 線上連線</div>
   <div id="app"></div>
-  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v36 · 後門彩蛋:房主排先手下一位確保觸發；情報交換/謠言記錄打出者</div>
+  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v37 · 安全性:玩家名字防 XSS(輸入消毒+渲染轉義)</div>
   <div id="toast" style="position:fixed;left:50%;bottom:30px;transform:translateX(-50%);
        background:#b02a4a;color:#fff;padding:12px 20px;border-radius:10px;font-size:1rem;
        opacity:0;transition:opacity .2s;pointer-events:none;z-index:99;max-width:90%;"></div>
@@ -194,7 +194,11 @@ function pointsFor(type, winnerIdx, criminalIdx){
 // ---------- 工具 ----------
 function shuffle(a){ a=[...a]; for(let i=a.length-1;i>0;i--){const j=Math.random()*(i+1)|0;[a[i],a[j]]=[a[j],a[i]];} return a; }
 function log(msg){ state.log.unshift(msg); }
-function pname(i){ return state.players[i].name; }
+// 防 XSS：插入 innerHTML 前把使用者可控字串(名字/紀錄)轉義
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+// 名字消毒：去掉 HTML 危險字元、限長 → 從源頭就安全
+function sanitizeName(s){ return String(s||'').replace(/[<>&"'`]/g,'').trim().slice(0,16); }
+function pname(i){ return esc(state.players[i].name); }   // 渲染用名字一律轉義
 function nextActive(from){
   const N=state.players.length;
   for(let k=1;k<=N;k++){ const i=(from+k)%N; if(state.players[i].hand.length>0) return i; }
@@ -288,7 +292,7 @@ function renderSetup(){
 }
 window.startGame = ()=>{
   const count=setupCount;
-  const names=[]; for(let i=0;i<count;i++){ const el=document.getElementById("n"+i); names.push((el&&el.value.trim())||("玩家"+(i+1))); }
+  const names=[]; for(let i=0;i<count;i++){ const el=document.getElementById("n"+i); names.push(sanitizeName(el&&el.value)||("玩家"+(i+1))); }
   withInspector = document.getElementById("useInspector").checked;
   playerNames = names; setupNames = names;
   scores = new Array(count).fill(0);   // 新一輪比賽，分數歸零（長度＝人數）
@@ -485,13 +489,13 @@ function seatingHtml(players, mySeat){
   for(let i=0;i<N;i++){
     const ang=(-90 + i*360/N)*Math.PI/180;
     const x=(C+R*Math.cos(ang)).toFixed(0), y=(C+R*Math.sin(ang)).toFixed(0), me=i===mySeat;
-    dots+=`<div style="position:absolute;left:${x}px;top:${y}px;transform:translate(-50%,-50%);background:${me?'#ffd34d':'#3a3260'};color:${me?'#2a2150':'#f2eefb'};border-radius:10px;padding:3px 7px;font-size:.78rem;white-space:nowrap;font-weight:${me?700:400}">${me?'🟢 ':''}${players[i].name}</div>`;
+    dots+=`<div style="position:absolute;left:${x}px;top:${y}px;transform:translate(-50%,-50%);background:${me?'#ffd34d':'#3a3260'};color:${me?'#2a2150':'#f2eefb'};border-radius:10px;padding:3px 7px;font-size:.78rem;white-space:nowrap;font-weight:${me?700:400}">${me?'🟢 ':''}${esc(players[i].name)}</div>`;
   }
   const L=(mySeat-1+N)%N, Rr=(mySeat+1)%N;
   return `<div class="panel" style="padding:10px">`+
     `<div class="sub" style="text-align:center">🪑 座位（順時針）</div>`+
     `<div style="position:relative;width:190px;height:190px;margin:6px auto">${dots}</div>`+
-    `<div class="sub" style="text-align:center;line-height:1.7">⬅ 左鄰 <b style="color:#ffd34d">${players[L].name}</b>（情報交換傳給他）<br>右鄰 <b style="color:#ffd34d">${players[Rr].name}</b> ➡（謠言從他抽）</div>`+
+    `<div class="sub" style="text-align:center;line-height:1.7">⬅ 左鄰 <b style="color:#ffd34d">${esc(players[L].name)}</b>（情報交換傳給他）<br>右鄰 <b style="color:#ffd34d">${esc(players[Rr].name)}</b> ➡（謠言從他抽）</div>`+
     `</div>`;
 }
 // 彩蛋煙火特效
@@ -878,7 +882,7 @@ window.enterOnline=()=>{
 function genCode(){ const a='ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let s=''; for(let i=0;i<4;i++)s+=a[Math.random()*a.length|0]; return s; }
 
 window.createRoom=async ()=>{
-  const name=(document.getElementById('myname').value||'').trim();
+  const name=sanitizeName(document.getElementById('myname').value);
   if(!name){ nope('請先輸入你的名字'); return; }
   net.myName=name; saveName(name); net.isHost=true; fbInit();
   const ws = +((document.getElementById('winsel')||{}).value || 10);   // 獲勝分數(5~10)
@@ -892,8 +896,8 @@ window.createRoom=async ()=>{
 };
 
 window.joinRoom=async ()=>{
-  const name=(document.getElementById('myname').value||'').trim();
-  const code=(document.getElementById('roomcode').value||'').trim().toUpperCase();
+  const name=sanitizeName(document.getElementById('myname').value);
+  const code=(document.getElementById('roomcode').value||'').trim().toUpperCase().replace(/[^A-Z0-9]/g,'');
   if(!name){ nope('請先輸入你的名字'); return; }
   if(code.length!==4){ nope('房號是 4 個字'); return; }
   net.myName=name; saveName(name); net.code=code; saveRoom(code); fbInit();
@@ -985,7 +989,7 @@ window.leaveToEntry=()=>{
 window.hostStart=()=>{
   const ids=Object.keys(net.room.players||{});
   if(ids.length<3){ nope('至少 3 人才能開始'); return; }
-  const names=ids.map(id=>net.room.players[id].name);
+  const names=ids.map(id=>sanitizeName(net.room.players[id].name)||'玩家');   // 房主端再消毒一次(防有人直接寫髒名字進DB)
   newGame(names);                                   // 重用單機引擎建局（內部會 render，此時 phase 仍 lobby）
   state.players.forEach((p,i)=>{ p.pid=ids[i]; p.bot=!!net.room.players[ids[i]].bot; });  // 座位 ↔ playerId、機器人標記
   const rs=(net.room&&net.room.scores)||{};
@@ -1319,7 +1323,7 @@ function renderGameView(pub, view){
     const cards=ui.cards.map(c=>`<div class="card ${c.crime?'crime':''} ${c.ok?'playable':'disabled'}" onclick="${c.ok?`netAct('play',${c.idx})`:`nope('${c.why}')`}"><div class="cname">${c.name}</div><div class="cdesc">${c.desc}</div>${c.ok?'':`<div class="cwhy">✗ ${c.why}</div>`}</div>`).join('');
     area=`<div class="big">輪到你了</div><div class="hand">${cards}</div>`;
   } else if(ui.kind==='target'){
-    area=`<div class="big">${ui.cardName}：選擇目標</div>`+ui.options.map(o=>`<button onclick="netAct('target',${o.idx})">${o.name}（${o.n}張）</button>`).join(' ');
+    area=`<div class="big">${ui.cardName}：選擇目標</div>`+ui.options.map(o=>`<button onclick="netAct('target',${o.idx})">${esc(o.name)}（${o.n}張）</button>`).join(' ');
   } else if(ui.kind==='pick'){
     const cards=ui.cards.map(c=>`<div class="card ${c.crime?'crime':''} playable" onclick="netAct('${ui.act}',${c.idx})"><div class="cname">${c.name}</div><div class="cdesc">${c.desc}</div></div>`).join('');
     area=`<div class="big">${ui.title}</div><div class="hand">${cards}</div>`;
@@ -1330,8 +1334,8 @@ function renderGameView(pub, view){
     const cards=hand.map(c=>`<div class="card ${CARDS[c]&&CARDS[c].crime?'crime':''} disabled"><div class="cname">${CARDS[c]?CARDS[c].name:c}</div><div class="cdesc">${CARDS[c]?CARDS[c].desc:''}</div></div>`).join('');
     area=`<div class="big">等待 ${ui.who||'其他玩家'}…</div><div class="sub">你的手牌（輪到你才能點）</div><div class="hand">${cards||'（空手）'}</div>`;
   }
-  const strip = pub&&pub.players ? `<div class="sub" style="margin-top:8px">總分　${pub.players.map((p,i)=>p.name+' '+(pub.scores?pub.scores[i]:0)).join('　·　')}</div>` : '';
-  const insp = pub&&pub.inspectorTarget>=0 ? `<div class="panel center" style="border-color:#ffd34d;padding:10px;margin-top:10px">👮 警部盯著 <b style="color:#ffd34d">${pub.players[pub.inspectorTarget].name}</b></div>` : '';
+  const strip = pub&&pub.players ? `<div class="sub" style="margin-top:8px">總分　${pub.players.map((p,i)=>esc(p.name)+' '+(pub.scores?pub.scores[i]:0)).join('　·　')}</div>` : '';
+  const insp = pub&&pub.inspectorTarget>=0 ? `<div class="panel center" style="border-color:#ffd34d;padding:10px;margin-top:10px">👮 警部盯著 <b style="color:#ffd34d">${esc(pub.players[pub.inspectorTarget].name)}</b></div>` : '';
   const logH = pub&&pub.log ? `<div class="log">${pub.log.map(l=>`<div>${l}</div>`).join('')}</div>` : '';
   const seat = (pub&&pub.players&&view&&view.seat!=null) ? seatingHtml(pub.players, view.seat) : '';
   app.innerHTML=`<div class="panel"><div class="sub">房號 ${net.code} <span id="cd" style="color:#ffd34d;font-weight:700"></span></div>${area}${strip}</div>${insp}${seat}${logH}`;
@@ -1342,10 +1346,10 @@ function renderNetGameOver(pub){
   const celebrate = villain
     ? `<img src="https://media.giphy.com/media/8EX8UxSNLRp5AonNfv/giphy.gif" style="max-width:280px;width:80%;border-radius:14px;margin:10px auto;display:block">`
     : `<div class="dancers"><span>🕺</span><span>💃</span><span>🕺</span><span>💃</span><span>🕺</span></div>`;
-  const rows=pub.players.map((p,i)=>({name:p.name,s:pub.scores?pub.scores[i]:0})).sort((a,b)=>b.s-a.s).map(r=>`<div style="padding:3px 0">${r.name}：<b>${r.s}</b></div>`).join('');
+  const rows=pub.players.map((p,i)=>({name:p.name,s:pub.scores?pub.scores[i]:0})).sort((a,b)=>b.s-a.s).map(r=>`<div style="padding:3px 0">${esc(r.name)}：<b>${r.s}</b></div>`).join('');
   let footer;
   if(g.matchWinner>=0){            // 有人達到門檻 → 系列賽結束
-    footer=`<div class="panel win center" style="border-color:#ffd34d"><div class="big" style="font-size:1.7rem;color:#ffd34d">🏆 ${pub.players[g.matchWinner].name} ${g.easter?'觸發彩蛋，直接贏得整場！':'達 '+target+' 分，贏得整場！'}</div></div>`+
+    footer=`<div class="panel win center" style="border-color:#ffd34d"><div class="big" style="font-size:1.7rem;color:#ffd34d">🏆 ${esc(pub.players[g.matchWinner].name)} ${g.easter?'觸發彩蛋，直接贏得整場！':'達 '+target+' 分，贏得整場！'}</div></div>`+
       `<div class="panel center">`+`<button onclick="newSeries()">再玩一場（分數歸零）</button>`+`<button class="ghost" onclick="leaveToEntry()">離開（回輸房號畫面）</button></div>`;
   } else {                         // 尚未分出整場 → 任何人都能按「再來一局」回大廳(分數保留)
     footer=`<div class="panel center">`+
@@ -1369,11 +1373,11 @@ function netEntry(){
   app.innerHTML=`
     <div class="panel">
       <div class="big">🌐 線上連線</div>
-      <input id="myname" placeholder="你的名字" value="${net.myName||''}">
+      <input id="myname" placeholder="你的名字" value="${esc(net.myName||'')}">
       <label style="display:block;margin:8px 0">獲勝分數：<select id="winsel" style="font-size:1rem;padding:6px;border-radius:8px">${opts}</select>（先達此分者贏得整場）</label>
       <button onclick="createRoom()">建立新房間（你當房主）</button>
       <hr style="border-color:#4a3d80;margin:14px 0">
-      <input id="roomcode" placeholder="輸入房號（4 個字）" maxlength="4" style="text-transform:uppercase" value="${loadRoom()}">
+      <input id="roomcode" placeholder="輸入房號（4 個字）" maxlength="4" style="text-transform:uppercase" value="${esc(loadRoom())}">
       <button onclick="joinRoom()">加入房間</button>
       <div class="sub" style="margin-top:6px">斷線後可用同一房號重新加入（會接回原本的遊戲）</div>
       <button class="ghost" onclick="net=null;mode=null;render()">← 回主選單</button>
@@ -1384,7 +1388,7 @@ function netLobby(){
   const room=net.room||{};
   const entries=room.players?Object.entries(room.players):[];
   const rs=room.scores||{};
-  const chips=entries.map(([id,p])=>`<span class="badge">${p.bot?'🤖 ':''}${p.name}${id===room.host?' 👑':''}${id===net.playerId?'（你）':''}${rs[id]?' '+rs[id]+'分':''}</span>`).join(' ');
+  const chips=entries.map(([id,p])=>`<span class="badge">${p.bot?'🤖 ':''}${esc(p.name)}${id===room.host?' 👑':''}${id===net.playerId?'（你）':''}${rs[id]?' '+rs[id]+'分':''}</span>`).join(' ');
   const n=entries.length, canStart=net.isHost && n>=3;
   const hasScores=Object.values(rs).some(v=>v>0);
   const botCount=entries.filter(([,p])=>p.bot).length;

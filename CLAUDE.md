@@ -51,7 +51,7 @@
 - apiKey 放前端是正常安全的；**資料庫目前是「測試模式」（任何人可讀寫），正式開放遊玩前必須設安全規則**。
 - 連線資料模型（大廳）：`rooms/{房號}/ { host, status, players/{playerId}:{name}, createdAt }`。
 
-## 目前進度（持續更新）— build v35（已上 GitHub Pages：github.com/kevin199804052-stack/criminal-dance）
+## 目前進度（持續更新）— build v37（已上 GitHub Pages：github.com/kevin199804052-stack/criminal-dance）
 - ✅ 本機同桌完整可玩：12 種牌、出牌限制、三種勝利、計分、賽末門檻、跳舞動畫、犯人逃脫顯示慶祝 GIF。
 - ✅ 多人 3–8 人：`buildDeck(N)` 依人數建牌、引擎一般化（計分/輪轉/左右鄰皆隨 N）。
 - ✅ **線上連線本體**（房主＝裁判）：Firebase `rooms/{code}/` 下 `public`（公開）/`views/{pid}`（個人手牌+提示，不外洩）/`actions`（玩家動作）；房主 `broadcast()`＋`applyAction()`；客端 `subscribeGame()`。
@@ -64,7 +64,8 @@
 - ✅ 不在場證明被指認可宣告不是犯人、不需棄掉；警部盯著犯人時犯人打出犯人牌→警部當場逮捕(+3)。
 - ✅ 🥚 隱藏彩蛋：輪到的人「完全沒牌可打」→放煙火、分數衝到門檻、直接贏整場（被提前換掉手牌則不觸發）。
 - ✅ 後門暗號：房主在大廳依序加減機器人 `+2,-1,+3,-2,+4,-3` 後開局→房主拿到彩蛋手牌（偵探,偵探,警部,犯人），且排在先手下一位以確保觸發。
-- 🚧 **唯一未完成（有時效）**：Firebase **安全規則**（仍測試模式，建立後約 30 天自動鎖死、屆時線上版會連不上；也防翻 DB 偷看手牌）。
+- ✅ 安全性(v37)：玩家名字防 XSS（`sanitizeName` 輸入消毒 + `esc()` 渲染轉義，房主端建局再消毒一次）。
+- 🚧 **唯一未完成（有時效，最大風險）**：Firebase **安全規則**。資料庫仍「測試模式」＝任何人可讀寫 → 可翻 `views/{pid}` 偷看所有人手牌（破壞隱藏資訊核心）、可刪/灌爆房間、且建立後約 30 天自動鎖死使線上版連不上。需：①Firebase console 啟用匿名登入②把 playerId 綁 auth.uid③貼安全規則(views 只能讀自己、actions 限登入者、public 限房主寫)。屬於需使用者在 console 操作＋程式改 async 登入的較大工程。
 - 推送：用 `commit-and-upload` skill；GitHub Desktop 已設好認證，`git push` 可直接成功。
 
 ## 相關 skill（在 `C:\Users\kevin\.claude\skills\`）
