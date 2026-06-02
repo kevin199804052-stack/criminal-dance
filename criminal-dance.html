@@ -83,12 +83,13 @@
 </style>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 </head>
 <body>
   <h1>🕺 犯人在跳舞</h1>
   <div class="sub">本機同桌 ＆ 線上連線</div>
   <div id="app"></div>
-  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v37 · 安全性:玩家名字防 XSS(輸入消毒+渲染轉義)</div>
+  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v38 · 安全性:線上改匿名登入(uid 當身分)，準備上安全規則</div>
   <div id="toast" style="position:fixed;left:50%;bottom:30px;transform:translateX(-50%);
        background:#b02a4a;color:#fff;padding:12px 20px;border-radius:10px;font-size:1rem;
        opacity:0;transition:opacity .2s;pointer-events:none;z-index:99;max-width:90%;"></div>
@@ -840,6 +841,16 @@ function fbInit(){
   db.ref('.info/serverTimeOffset').on('value', s=>{ svOff=s.val()||0; });
   return db;
 }
+// 匿名登入：拿到一個跨分頁持久的身分碼(uid)，用它當 playerId。
+// 之後安全規則會限制「views/{pid} 只能讀自己」「寫入要登入」，靠的就是這個 uid。
+async function ensureAuth(){
+  fbInit();
+  if(!firebase.auth){ return getPlayerId(); }   // 萬一 auth SDK 沒載成功，退回舊的隨機 id(不讓遊戲整個壞掉)
+  const auth=firebase.auth();
+  if(auth.currentUser) return auth.currentUser.uid;
+  const cred=await auth.signInAnonymously();
+  return cred.user.uid;
+}
 
 let net = null;  // { phase, code, playerId, myName, isHost, room, ref }
 
@@ -861,6 +872,9 @@ function renderLanding(){
 }
 
 function getPlayerId(){
+  // 已匿名登入 → 一律用登入身分(uid)，安全規則才認得出「自己」
+  try{ if(firebase&&firebase.auth&&firebase.auth().currentUser) return firebase.auth().currentUser.uid; }catch(e){}
+  // 還沒登入(或 auth 沒載) → 退回舊的隨機 id 當暫時值
   let id=null; try{ id=sessionStorage.getItem('cd_pid'); }catch(e){}
   if(!id){ id='p'+Math.random().toString(36).slice(2,9); try{ sessionStorage.setItem('cd_pid',id); }catch(e){} }
   return id;
@@ -872,11 +886,17 @@ function saveRoom(c){ try{ localStorage.setItem('cd_room', c||''); }catch(e){} }
 function loadLastPid(){ try{ return localStorage.getItem('cd_lastpid')||''; }catch(e){ return ''; } }   // 記住上次身分id(關掉分頁後仍能重連)
 function saveLastPid(p){ try{ localStorage.setItem('cd_lastpid', p||''); }catch(e){} }
 const BOT_NAMES=['Erica04','一直委曲求全','ahang','坐著看花','ChengLin','Richard','ㄧㄨ','啾啾','qaintang','CICADA','挖玨機'];
-window.enterOnline=()=>{
+window.enterOnline=async ()=>{
   mode='online';
   net={ phase:'entry', code:null, playerId:getPlayerId(),
         myName:loadName(), isHost:false, room:null };
-  render();
+  render();   // 先畫出畫面(顯示連線中也行)
+  try{
+    const uid=await ensureAuth();         // 匿名登入，拿到持久身分
+    if(net){ net.playerId=uid; }          // 用 uid 取代暫時的隨機 id
+  }catch(e){
+    nope('連線登入失敗，請重新整理再試');   // 匿名登入若沒在 console 啟用會走到這
+  }
 };
 
 function genCode(){ const a='ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let s=''; for(let i=0;i<4;i++)s+=a[Math.random()*a.length|0]; return s; }
@@ -885,6 +905,7 @@ window.createRoom=async ()=>{
   const name=sanitizeName(document.getElementById('myname').value);
   if(!name){ nope('請先輸入你的名字'); return; }
   net.myName=name; saveName(name); net.isHost=true; fbInit();
+  try{ net.playerId=await ensureAuth(); }catch(e){ nope('連線登入失敗，請重新整理'); return; }
   const ws = +((document.getElementById('winsel')||{}).value || 10);   // 獲勝分數(5~10)
   const code=genCode(); net.code=code; saveRoom(code); saveLastPid(net.playerId);
   await db.ref('rooms/'+code).set({
@@ -901,6 +922,7 @@ window.joinRoom=async ()=>{
   if(!name){ nope('請先輸入你的名字'); return; }
   if(code.length!==4){ nope('房號是 4 個字'); return; }
   net.myName=name; saveName(name); net.code=code; saveRoom(code); fbInit();
+  try{ net.playerId=await ensureAuth(); }catch(e){ nope('連線登入失敗，請重新整理'); return; }
   const roomRef=db.ref('rooms/'+code);
   const room=(await roomRef.once('value')).val();
   if(!room){ nope('找不到這個房間'); return; }
