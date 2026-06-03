@@ -17,11 +17,11 @@
           ".write": "auth != null && newData.parent().child('host').val() === auth.uid",
           ".validate": "newData.isNumber() && newData.val() >= 5 && newData.val() <= 10"
         },
-        "createdAt": { ".write": "auth != null" },
+        "createdAt": { ".write": "auth != null && newData.parent().child('host').val() === auth.uid" },
         "players": {
           "$pid": {
             ".write": "auth != null && ($pid === auth.uid || data.parent().parent().child('host').val() === auth.uid || newData.parent().parent().child('host').val() === auth.uid)",
-            ".validate": "newData.child('name').isString() && newData.child('name').val().length <= 32"
+            ".validate": "newData.child('name').isString() && newData.child('name').val().length <= 32 && !newData.child('name').val().matches(/[<>&\"'`]/)"
           }
         },
         "scores": {
@@ -37,7 +37,7 @@
     },
     "views": {
       "$code": {
-        ".write": "auth != null && !newData.exists() && (!root.child('rooms').child($code).exists() || root.child('rooms').child($code).child('players').child(auth.uid).exists())",
+        ".write": "auth != null && !newData.exists() && (!root.child('rooms').child($code).exists() || root.child('rooms').child($code).child('host').val() === auth.uid)",
         "$pid": {
           ".read": "auth != null && ($pid === auth.uid || root.child('rooms').child($code).child('host').val() === auth.uid)",
           ".write": "auth != null && root.child('rooms').child($code).child('host').val() === auth.uid"
