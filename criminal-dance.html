@@ -89,7 +89,7 @@
   <h1>🕺 犯人在跳舞</h1>
   <div class="sub">本機同桌 ＆ 線上連線</div>
   <div id="app"></div>
-  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v39 · 安全性:手牌(views)移到獨立節點，準備上安全規則保護手牌</div>
+  <div style="position:fixed;right:8px;bottom:6px;font-size:.7rem;color:#6a5fa0;z-index:90;">build v40 · 安全性:房主端嚴驗payload/機器人以pid判定/房主轉移確定性接手/再玩一場限房主</div>
   <div id="toast" style="position:fixed;left:50%;bottom:30px;transform:translateX(-50%);
        background:#b02a4a;color:#fff;padding:12px 20px;border-radius:10px;font-size:1rem;
        opacity:0;transition:opacity .2s;pointer-events:none;z-index:99;max-width:90%;"></div>
@@ -961,10 +961,10 @@ function attachRoom(code){
     // 房主不在了 → 由剩餘玩家中 id 最小者負責「隨機」指派一位新房主（單一寫入避免衝突）
     const pids=net.room.players?Object.keys(net.room.players):[];
     if(pids.length>0 && !pids.includes(net.room.host)){
-      const realPids=pids.filter(p=>!net.room.players[p].bot);   // 機器人不能當房主
+      const realPids=pids.filter(p=>!/^bot\d+$/.test(p));   // 機器人不能當房主（以 pid 形式判定，不信任可寫的 bot 欄位）
       if(realPids.length===0){ nope('房間已無真人，關閉'); leaveRoom(); return; }
       if([...realPids].sort()[0]===net.playerId){
-        roomRef.child('host').set(realPids[Math.floor(Math.random()*realPids.length)]);
+        roomRef.child('host').set(net.playerId);   // id 最小的真人接手當房主（確定性；配合規則「host 只能設給自己」）
       }
       return; // 等 host 欄位更新後此監聽會再次觸發
     }
@@ -1013,7 +1013,7 @@ window.hostStart=()=>{
   if(ids.length<3){ nope('至少 3 人才能開始'); return; }
   const names=ids.map(id=>sanitizeName(net.room.players[id].name)||'玩家');   // 房主端再消毒一次(防有人直接寫髒名字進DB)
   newGame(names);                                   // 重用單機引擎建局（內部會 render，此時 phase 仍 lobby）
-  state.players.forEach((p,i)=>{ p.pid=ids[i]; p.bot=!!net.room.players[ids[i]].bot; });  // 座位 ↔ playerId、機器人標記
+  state.players.forEach((p,i)=>{ p.pid=ids[i]; p.bot=/^bot\d+$/.test(ids[i]) && !!net.room.players[ids[i]].bot; });  // 座位 ↔ playerId；機器人僅認房主建立的 botN（不信任玩家可寫的 bot 欄位）
   const rs=(net.room&&net.room.scores)||{};
   scores=ids.map(pid=>rs[pid]||0);   // 依房間內 pid 延續系列賽分數（機器人也保留）；新房=0
   WIN_SCORE=(net.room&&net.room.winScore)||10;   // 開房時設定的獲勝分數(5~10)
@@ -1038,8 +1038,8 @@ window.backToLobby=(reset)=>{
 };
 // 任何人都能按「再來一局」→ 全體回大廳（分數保留），再由房主按開始
 window.toLobby=()=>{ if(net&&db) db.ref('rooms/'+net.code+'/status').set('lobby'); };
-// 整場結束後「再玩一場」→ 清空分數歸0、全體回大廳
-window.newSeries=()=>{ if(net&&db){ db.ref('rooms/'+net.code+'/scores').remove(); db.ref('rooms/'+net.code+'/status').set('lobby'); } };
+// 整場結束後「再玩一場」→ 清空分數歸0、全體回大廳（限房主：分數只有房主能寫，避免非房主按了清不掉分數）
+window.newSeries=()=>{ if(net&&net.isHost&&db){ db.ref('rooms/'+net.code+'/scores').remove(); db.ref('rooms/'+net.code+'/status').set('lobby'); } };
 // 🥚 後門暗號：加/減機器人的點擊序列 +2,-1,+3,-2,+4,-3 → 下一局房主直接拿到彩蛋手牌
 const CHEAT_CODE='++-+++--++++---';
 function pushCheat(sym){
@@ -1210,7 +1210,8 @@ function applyAction(a){
   if(a.type==='tradePick' && tradeCollecting()){
     const a0=state.current, b0=state.pending.target;
     const seat=state.players.findIndex(p=>p.pid===a.by);
-    if((seat===a0||seat===b0) && state.players[seat].hand.length>0 && state.pending.tradePicks[seat]===undefined){
+    if((seat===a0||seat===b0) && state.players[seat].hand.length>0 && state.pending.tradePicks[seat]===undefined
+       && Number.isInteger(a.payload) && a.payload>=0 && a.payload<state.players[seat].hand.length){
       state.pending.tradePicks[seat]=state.players[seat].hand[a.payload];
       if(net.penalty) delete net.penalty[a.by];   // 正常行動→解除該玩家的超時懲罰
       const req=[a0,b0].filter(s=>state.players[s].hand.length>0);
@@ -1223,7 +1224,8 @@ function applyAction(a){
   if(a.type==='infoSwapPick' && state.pending && state.pending.type==='infoSwap'
      && (state.phase==='infoSwapPass'||state.phase==='infoSwapPick')){
     const seat=state.players.findIndex(p=>p.pid===a.by);
-    if(seat>=0 && state.pending.queue.includes(seat) && state.pending.picks[seat]===undefined){
+    if(seat>=0 && state.pending.queue.includes(seat) && state.pending.picks[seat]===undefined
+       && Number.isInteger(a.payload) && a.payload>=0 && a.payload<state.players[seat].hand.length){
       state.pending.picks[seat]=state.players[seat].hand[a.payload];
       if(net.penalty) delete net.penalty[a.by];   // 正常行動→解除該玩家的超時懲罰
       if(state.pending.queue.every(q=>state.pending.picks[q]!==undefined)){ clearTurnTimer(); resolveInfoSwapOnline(); }
@@ -1235,6 +1237,13 @@ function applyAction(a){
   if(sp.actor<0) return;
   if(a.by!==state.players[sp.actor].pid) return;   // 只接受「該操作的人」
   if(a.type!==sp.ui.act) return;                    // 型別需符合當前期待
+  // 房主端不信任客戶端傳來的索引：嚴格驗證 payload 範圍，防越界讓房主端崩潰或作弊
+  if(a.type==='target'){
+    if(!(sp.ui.options && sp.ui.options.some(o=>o.idx===a.payload))) return;   // 目標須是合法選項座位
+  }else if(a.type!=='reveal-ack'){
+    const _h=state.players[sp.actor].hand;
+    if(!(Number.isInteger(a.payload) && a.payload>=0 && a.payload<_h.length)) return;   // 手牌索引須在範圍內
+  }
   clearTurnTimer(); if(net.penalty) delete net.penalty[a.by];   // 正常行動 → 解除該玩家的超時懲罰(回30秒)
   switch(a.type){
     case 'play': playCard(a.payload); break;
@@ -1372,7 +1381,7 @@ function renderNetGameOver(pub){
   let footer;
   if(g.matchWinner>=0){            // 有人達到門檻 → 系列賽結束
     footer=`<div class="panel win center" style="border-color:#ffd34d"><div class="big" style="font-size:1.7rem;color:#ffd34d">🏆 ${esc(pub.players[g.matchWinner].name)} ${g.easter?'觸發彩蛋，直接贏得整場！':'達 '+target+' 分，贏得整場！'}</div></div>`+
-      `<div class="panel center">`+`<button onclick="newSeries()">再玩一場（分數歸零）</button>`+`<button class="ghost" onclick="leaveToEntry()">離開（回輸房號畫面）</button></div>`;
+      `<div class="panel center">`+(net.isHost?`<button onclick="newSeries()">再玩一場（分數歸零）</button>`:`<div class="sub" style="margin-bottom:8px">由房主按「再玩一場」開新一場（分數歸零）</div>`)+`<button class="ghost" onclick="leaveToEntry()">離開（回輸房號畫面）</button></div>`;
   } else {                         // 尚未分出整場 → 任何人都能按「再來一局」回大廳(分數保留)
     footer=`<div class="panel center">`+
       `<button onclick="toLobby()">再來一局（回大廳，分數續累積）</button>`+
